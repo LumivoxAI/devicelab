@@ -1,0 +1,70 @@
+[project]
+name = "lumivox-devicelab"
+version = "0.1.0"
+description = "Lumivox AI devicelab"
+authors = [
+    {name = "ReanGD", email = "reangd@gmail.com"},
+]
+requires-python = ">=3.11,<3.13"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["audio"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "structlog==25.5.0",
+    "rich>=13.9,<15",
+]
+
+[project.optional-dependencies]
+loki = [
+    "python-logging-loki-v2==1.1.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.5",
+    "ipywidgets>=8.1.5",
+    "mypy>=1.18,<2",
+    "pytest>=9,<10",
+    "pytest-asyncio>=1,<2",
+    "ruff>=0.14,<0.15",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.isort]
+length-sort = true
+
+[tool.mypy]
+files = ["src/lumivox_devicelab", "tests"]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+
+[project.urls]
+Homepage = "https://github.com/LumivoxAI/devicelab"
+Documentation = "https://github.com/LumivoxAI/devicelab"
+Issues = "https://github.com/LumivoxAI/devicelab/issues"
