@@ -19,13 +19,8 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
 dependencies = [
-    "structlog==25.5.0",
-    "rich>=13.9,<15",
-]
-
-[project.optional-dependencies]
-loki = [
-    "python-logging-loki-v2==1.1.1",
+    "lumivox-core @ git+https://github.com/LumivoxAI/core.git@master",
+    "numpy>=2,<3",
 ]
 
 [build-system]
@@ -48,6 +43,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+extend-exclude = ["src/tmp"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -60,6 +56,7 @@ length-sort = true
 
 [tool.mypy]
 files = ["src/lumivox_devicelab", "tests"]
+exclude = ["^src/tmp/"]
 python_version = "3.11"
 strict = true
 warn_unreachable = true
