@@ -6,7 +6,7 @@
 
 ## FileReplayMode
 
-`FileReplayMode` описывает политику будущего builder-а pipeline для файлового входа:
+`FileReplayMode` описывает политику builder-а pipeline для файлового входа:
 
 | Значение | Значение для pipeline |
 | --- | --- |
