@@ -1,6 +1,6 @@
 # Элементы PipeWire GStreamer
 
-Этот модуль содержит внутренние обёртки над `pipewiresrc` и `pipewiresink`. Они создают GStreamer-элемент сразу и не являются публичным API Devicelab. Если фабрика соответствующего плагина недоступна, создание завершается `GStreamerElementError`; ошибки подключения, согласования caps и устройства поступают через bus pipeline при запуске.
+Этот модуль содержит внутренние обёртки над `pipewiresrc` и `pipewiresink`. Общие инварианты внутреннего GStreamer-слоя описаны в `../README.md`. Если фабрика соответствующего плагина недоступна, создание завершается `GStreamerElementError`; ошибки подключения, согласования caps и устройства поступают через bus pipeline при запуске.
 
 Обе обёртки принимают необязательные `target_object`, `client_name` и `name`. Пустые строки для `target_object` и `client_name` отклоняются с `ValueError`. `target_object` передаётся свойству PipeWire `target-object` и выбирает node по имени или serial; отсутствие значения оставляет выбор устройству и session manager. `client_name` задаёт имя GStreamer-клиента для PipeWire. `name` является необязательным именем GStreamer-элемента.
 
