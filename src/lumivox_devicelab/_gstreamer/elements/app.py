@@ -65,7 +65,10 @@ class AppSink(BaseElement):
             segment = sample.get_segment()
             if segment is None:
                 return data, int(pts)
-            return data, int(segment.to_running_time(gst.Format.TIME, pts))
+            running_time = segment.to_running_time(gst.Format.TIME, pts)
+            if running_time == gst.CLOCK_TIME_NONE:
+                return data, None
+            return data, int(running_time)
         finally:
             buffer.unmap(map_info)
 

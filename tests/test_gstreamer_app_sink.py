@@ -140,3 +140,21 @@ def test_appsink_returns_no_timestamp_for_clock_time_none(monkeypatch: pytest.Mo
 
     assert data is not None
     assert timestamp is None
+
+
+def test_appsink_returns_no_timestamp_when_segment_cannot_convert_pts(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = RawAudioSpec(rate=16_000, channels=1)
+    sample, _ = _sample(np.array([1], dtype="<i2").tobytes(), spec=spec)
+    sample.get_segment.return_value = SimpleNamespace(to_running_time=Mock(return_value=-1))
+    monkeypatch.setattr(
+        app,
+        "get_gst",
+        lambda: SimpleNamespace(
+            CLOCK_TIME_NONE=-1, Format=SimpleNamespace(TIME=object()), MapFlags=SimpleNamespace(READ=object())
+        ),
+    )
+
+    data, timestamp = _app_sink(spec)._to_array(sample)
+
+    assert data is not None
+    assert timestamp is None
