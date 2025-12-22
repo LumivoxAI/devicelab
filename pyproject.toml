@@ -39,6 +39,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "gstreamer: controlled test requiring PyGObject and GStreamer >=1.24",
+    "pipewire_hardware(device): opt-in test that opens a configured PipeWire device",
+]
 
 [tool.ruff]
 line-length = 120

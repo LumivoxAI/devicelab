@@ -37,6 +37,18 @@ typecheck:
 test:
     uv run pytest
 
+# Run pure tests that do not require GStreamer or physical audio devices.
+test_pure:
+    uv run pytest -m "not gstreamer and not pipewire_hardware"
+
+# Run controlled GStreamer tests; unavailable system dependencies are reported as skips.
+test_gstreamer:
+    uv run pytest -m gstreamer
+
+# Run opt-in tests against stable PipeWire device IDs from the environment.
+test_hardware:
+    uv run pytest -m pipewire_hardware --run-pipewire-hardware
+
 # Test with every dependency group and optional feature enabled.
 test_all:
     uv run --all-groups --all-extras pytest
