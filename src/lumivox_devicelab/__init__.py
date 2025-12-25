@@ -11,6 +11,17 @@ from lumivox_devicelab.errors import (
     PlaybackSubmissionError,
 )
 from lumivox_devicelab.capture import CapturedChunk, CaptureContext, CaptureHandler
+from lumivox_devicelab.devices import (
+    IntRange,
+    ByteOrder,
+    PcmFormat,
+    AudioDevice,
+    PcmSampleKind,
+    DeviceSnapshot,
+    AudioCapability,
+    SpeakerDeviceDiscovery,
+    MicrophoneDeviceDiscovery,
+)
 from lumivox_devicelab.formats import AudioFormat, ChannelSelection
 
 __all__ = [
@@ -27,4 +38,13 @@ __all__ = [
     "CaptureContext",
     "CapturedChunk",
     "CaptureHandler",
+    "PcmSampleKind",
+    "ByteOrder",
+    "PcmFormat",
+    "IntRange",
+    "AudioCapability",
+    "AudioDevice",
+    "DeviceSnapshot",
+    "MicrophoneDeviceDiscovery",
+    "SpeakerDeviceDiscovery",
 ]

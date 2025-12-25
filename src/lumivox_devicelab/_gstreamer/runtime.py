@@ -6,6 +6,7 @@ from typing import Any
 from threading import Lock
 
 _gst: Any | None = None
+_gst_audio: Any | None = None
 _gst_lock = Lock()
 
 
@@ -39,3 +40,26 @@ def get_gst() -> Any:
 
     assert _gst is not None
     return _gst
+
+
+def get_gst_audio() -> Any:
+    """Load the GStreamer Audio introspection namespace on first use."""
+    global _gst_audio
+    get_gst()
+    if _gst_audio is None:
+        with _gst_lock:
+            if _gst_audio is None:
+                try:
+                    import gi
+
+                    gi.require_version("GstAudio", "1.0")
+                    from gi.repository import GstAudio
+                except (ImportError, ValueError) as error:
+                    raise GStreamerUnavailableError(
+                        "PyGObject with GStreamer Audio 1.0 introspection bindings is required. "
+                        "Install the GStreamer base introspection and Python override packages."
+                    ) from error
+                _gst_audio = GstAudio
+
+    assert _gst_audio is not None
+    return _gst_audio
