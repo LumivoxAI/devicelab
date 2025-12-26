@@ -30,7 +30,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--run-pipewire-hardware",
         action="store_true",
         default=False,
-        help="run opt-in tests that open configured PipeWire devices",
+        help="run opt-in tests that access configured PipeWire devices",
     )
 
 
