@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Any
 
 from .base import BaseElement
-from ..runtime import GStreamerElementError, get_gst
 
 
 class QueueOverflowPolicy(IntEnum):
@@ -34,29 +32,6 @@ class AudioQueue(BaseElement):
 class Tee(BaseElement):
     def __init__(self, name: str | None = None) -> None:
         super().__init__("tee", name)
-        self._requested_pads: list[Any] = []
-
-    def link(self, next_element: BaseElement) -> BaseElement:
-        template = self.impl.get_pad_template("src_%u")
-        if template is None:
-            raise GStreamerElementError(f"Failed to get request-pad template from {self}")
-        source_pad = self.impl.request_pad(template, None, None)
-        if source_pad is None:
-            raise GStreamerElementError(f"Failed to request source pad from {self}")
-        sink_pad = next_element.impl.get_static_pad("sink")
-        if sink_pad is None:
-            self.impl.release_request_pad(source_pad)
-            raise GStreamerElementError(f"Failed to get sink pad from {next_element}")
-        if source_pad.link(sink_pad) != get_gst().PadLinkReturn.OK:
-            self.impl.release_request_pad(source_pad)
-            raise GStreamerElementError(f"Failed to link {self} -> {next_element}")
-        self._requested_pads.append(source_pad)
-        return next_element
-
-    def release_request_pads(self) -> None:
-        for source_pad in self._requested_pads:
-            self.impl.release_request_pad(source_pad)
-        self._requested_pads.clear()
 
 
 class ClockSync(BaseElement):

@@ -41,19 +41,19 @@ AudioQueue(max_time_ms=200, overflow_policy=QueueOverflowPolicy.DROP_OLD)
 
 ## Tee
 
-`Tee` является обёрткой над `tee` и разделяет один входной поток на несколько downstream-ветвей. В отличие от обычного `BaseElement.link()`, каждый вызов `Tee.link()` запрашивает новый source pad по шаблону `src_%u` и связывает его со статическим sink pad следующего элемента.
+`Tee` является тонкой обёрткой над `tee` и разделяет один входной поток на несколько downstream-ветвей. Request-pad создаёт и связывает только внутренний `_PipelineGraph`, чтобы у pad был единственный владелец.
 
 ```python
 tee = Tee(name="capture_tee")
-tee.link(AudioQueue()).link(AppSink(spec))
-tee.link(AudioQueue()).link(WavEnc()).link(FileSink("recording.wav"))
+graph.branch(tee, AudioQueue(), AppSink(spec))
+graph.branch(tee, AudioQueue(), WavEnc(), FileSink("recording.wav"))
 ```
 
 В примере очереди изолируют ветвь capture delivery и ветвь записи. Без них блокировка одной ветви способна остановить распределение данных через `tee` для другой.
 
-`link()` возвращает `next_element`, поэтому после него можно продолжать обычное построение цепочки. Если шаблон request-pad отсутствует, `tee` не смог выделить source pad, у следующего элемента нет sink pad или связывание pad завершилось неуспешно, метод освобождает уже выделенный pad, когда это необходимо, и выбрасывает `GStreamerElementError`.
+`graph.branch()` возвращает последний элемент ветви. Если шаблон request-pad отсутствует, `tee` не смог выделить source pad, у следующего элемента нет sink pad или связывание завершилось неуспешно, метод выбрасывает `GStreamerElementError`.
 
-Каждый успешно запрошенный source pad хранится обёрткой. Владелец pipeline должен вызвать `release_request_pads()` при teardown, до освобождения `tee`. Метод освобождает все сохранённые request-pad и очищает внутренний список; повторный вызов безопасен. `Tee` не создаёт и не добавляет элементы ветвей в pipeline: builder должен добавить `tee` и все элементы ветвей самостоятельно до запуска pipeline.
+Каждый успешно запрошенный source pad немедленно сохраняется графом, включая pad незавершённой ветви. `graph.release()` освобождает все request-pad до удаления `tee`; повторный вызов безопасен и повторяет только неудавшиеся операции очистки. `Tee` не создаёт и не добавляет элементы ветвей в pipeline: граф должен добавить `tee` и все элементы ветвей до запуска pipeline.
 
 ## ClockSync
 
