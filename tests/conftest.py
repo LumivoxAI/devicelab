@@ -45,15 +45,21 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 @pytest.fixture(autouse=True)
 def _require_marked_test_environment(request: pytest.FixtureRequest) -> Iterator[None]:
+    gstreamer_marker = request.node.get_closest_marker("gstreamer")
     hardware_marker = request.node.get_closest_marker("pipewire_hardware")
-    if request.node.get_closest_marker("gstreamer") is not None or hardware_marker is not None:
+    if gstreamer_marker is not None or hardware_marker is not None:
         try:
             gst = get_gst()
         except GStreamerUnavailableError as error:
             pytest.skip(f"controlled GStreamer test unavailable: {error}")
         if gst.version() < (1, 24, 0, 0):
             pytest.skip(f"controlled GStreamer tests require GStreamer >=1.24; found {gst.version_string()}")
-        missing = [name for name in REQUIRED_GSTREAMER_FACTORIES if gst.ElementFactory.find(name) is None]
+        required_factories = (
+            gstreamer_marker.kwargs.get("factories", REQUIRED_GSTREAMER_FACTORIES)
+            if gstreamer_marker is not None
+            else REQUIRED_GSTREAMER_FACTORIES
+        )
+        missing = [name for name in required_factories if gst.ElementFactory.find(name) is None]
         if missing:
             pytest.skip(f"controlled GStreamer tests require missing plugin factories: {', '.join(missing)}")
 
