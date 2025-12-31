@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from enum import Enum, IntFlag
 from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -14,45 +16,107 @@ if TYPE_CHECKING:
     from gi.repository import Gst  # type: ignore[import-not-found]
 
 _MAX_APP_SRC_BUFFER_TIME_MS = 20
+_NANOSECONDS_PER_SECOND = 1_000_000_000
+_LIVE_APP_SINK_BUFFERS = 1
+_BATCH_APP_SINK_BUFFERS = 8
+
+
+class AppSinkPolicy(Enum):
+    """Bounded buffering behavior for one capture use case."""
+
+    LIVE_DROP = "live_drop"
+    BATCH_BLOCK = "batch_block"
+
+
+class CapturePacketFlags(IntFlag):
+    """Backend-neutral buffer flags relevant to capture delivery."""
+
+    NONE = 0
+    DISCONT = 1
+    GAP = 2
+
+
+class CapturePacketErrorKind(Enum):
+    """Health category for a packet that cannot be delivered."""
+
+    CAPS = "caps"
+    MAPPING = "mapping"
+    MALFORMED = "malformed"
+    MISSING_TIMESTAMP = "missing_timestamp"
+
+
+class CapturePacketError(GStreamerElementError):
+    """A discarded AppSink packet with a stable health category."""
+
+    def __init__(self, kind: CapturePacketErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+@dataclass(frozen=True, slots=True)
+class CapturePacket:
+    """One copied, timestamped buffer pulled from AppSink."""
+
+    samples: np.ndarray
+    running_time_ns: int
+    duration_ns: int
+    flags: CapturePacketFlags
 
 
 class AppSink(BaseElement):
     """Pull normalized audio buffers from GStreamer as copied NumPy arrays."""
 
-    def __init__(self, spec: RawAudioSpec, name: str | None = None) -> None:
+    def __init__(
+        self,
+        spec: RawAudioSpec,
+        name: str | None = None,
+        *,
+        policy: AppSinkPolicy = AppSinkPolicy.LIVE_DROP,
+        max_buffers: int | None = None,
+    ) -> None:
+        if not isinstance(policy, AppSinkPolicy):
+            raise TypeError("policy must be an AppSinkPolicy")
+        if max_buffers is None:
+            max_buffers = _LIVE_APP_SINK_BUFFERS if policy is AppSinkPolicy.LIVE_DROP else _BATCH_APP_SINK_BUFFERS
+        if isinstance(max_buffers, bool) or not isinstance(max_buffers, int):
+            raise TypeError("max_buffers must be an integer")
+        if max_buffers <= 0:
+            raise ValueError("max_buffers must be positive")
         super().__init__("appsink", name)
         self._spec = spec
+        self._segment_key: tuple[object, ...] | None = None
         self.impl.set_property("emit-signals", False)
         self.impl.set_property("sync", False)
-        self.impl.set_property("max-buffers", 1)
+        self.impl.set_property("max-buffers", max_buffers)
         self.impl.set_property("max-bytes", 0)
         self.impl.set_property("max-time", 0)
-        self.impl.set_property("drop", True)
+        self.impl.set_property("drop", policy is AppSinkPolicy.LIVE_DROP)
         self.impl.set_property("enable-last-sample", False)
         self.impl.set_property("wait-on-eos", False)
 
-    def try_pull(self, timeout_ms: int = 100) -> tuple[np.ndarray | None, int | None]:
+    def try_pull(self, timeout_ms: int = 100) -> CapturePacket | None:
         if timeout_ms < 0:
             raise ValueError("timeout_ms must not be negative")
         sample = self.impl.emit("try-pull-sample", timeout_ms * 1_000_000)
         if sample is None:
-            return None, None
-        return self._to_array(sample)
+            return None
+        return self._to_packet(sample)
 
-    def _to_array(self, sample: Any) -> tuple[np.ndarray | None, int | None]:
+    def _to_packet(self, sample: Any) -> CapturePacket:
         self._validate_sample_caps(sample)
         buffer = sample.get_buffer()
         if buffer is None:
-            raise GStreamerElementError("appsink sample has no buffer")
+            raise CapturePacketError(CapturePacketErrorKind.MALFORMED, "appsink sample has no buffer")
         mapped, map_info = buffer.map(get_gst().MapFlags.READ)
         if not mapped or map_info is None:
-            raise GStreamerElementError("failed to map appsink buffer")
+            raise CapturePacketError(CapturePacketErrorKind.MAPPING, "failed to map appsink buffer")
         try:
             if map_info.size == 0:
-                return None, None
+                raise CapturePacketError(CapturePacketErrorKind.MALFORMED, "appsink buffer is empty")
             if map_info.size % self._spec.frame_size != 0:
-                raise GStreamerElementError(
-                    f"appsink buffer size {map_info.size} is not a multiple of frame size {self._spec.frame_size}"
+                raise CapturePacketError(
+                    CapturePacketErrorKind.MALFORMED,
+                    f"appsink buffer size {map_info.size} is not a multiple of frame size {self._spec.frame_size}",
                 )
             data = np.frombuffer(memoryview(map_info.data), dtype=S16LE_DTYPE).copy()
             if self._spec.channels > 1:
@@ -61,24 +125,40 @@ class AppSink(BaseElement):
             pts = buffer.pts
             gst = get_gst()
             if pts == gst.CLOCK_TIME_NONE:
-                return data, None
+                raise CapturePacketError(CapturePacketErrorKind.MISSING_TIMESTAMP, "appsink buffer has no PTS")
             segment = sample.get_segment()
             if segment is None:
-                return data, int(pts)
+                raise CapturePacketError(CapturePacketErrorKind.MISSING_TIMESTAMP, "appsink sample has no segment")
             running_time = segment.to_running_time(gst.Format.TIME, pts)
             if running_time == gst.CLOCK_TIME_NONE:
-                return data, None
-            return data, int(running_time)
+                raise CapturePacketError(
+                    CapturePacketErrorKind.MISSING_TIMESTAMP,
+                    "appsink PTS cannot be converted to running time",
+                )
+
+            flags = CapturePacketFlags.NONE
+            if buffer.has_flags(gst.BufferFlags.DISCONT):
+                flags |= CapturePacketFlags.DISCONT
+            if buffer.has_flags(gst.BufferFlags.GAP):
+                flags |= CapturePacketFlags.GAP
+            segment_key = self._get_segment_key(segment)
+            if self._segment_key is not None and segment_key != self._segment_key:
+                flags |= CapturePacketFlags.DISCONT
+            self._segment_key = segment_key
+
+            frames = map_info.size // self._spec.frame_size
+            duration_ns = frames * _NANOSECONDS_PER_SECOND // self._spec.rate
+            return CapturePacket(data, int(running_time), duration_ns, flags)
         finally:
             buffer.unmap(map_info)
 
     def _validate_sample_caps(self, sample: Any) -> None:
         caps = sample.get_caps()
         if caps is None or caps.is_empty() or caps.is_any():
-            raise GStreamerElementError("appsink sample has no fixed caps")
+            raise CapturePacketError(CapturePacketErrorKind.CAPS, "appsink sample has no fixed caps")
         structure = caps.get_structure(0)
         if structure is None:
-            raise GStreamerElementError("appsink sample caps have no structure")
+            raise CapturePacketError(CapturePacketErrorKind.CAPS, "appsink sample caps have no structure")
         success, rate = structure.get_int("rate")
         channels_success, channels = structure.get_int("channels")
         if (
@@ -90,7 +170,17 @@ class AppSink(BaseElement):
             or not channels_success
             or channels != self._spec.channels
         ):
-            raise GStreamerElementError("appsink caps do not match the requested S16LE interleaved audio specification")
+            raise CapturePacketError(
+                CapturePacketErrorKind.CAPS,
+                "appsink caps do not match the requested S16LE interleaved audio specification",
+            )
+
+    @staticmethod
+    def _get_segment_key(segment: Any) -> tuple[object, ...]:
+        return tuple(
+            getattr(segment, field, None)
+            for field in ("format", "flags", "rate", "applied_rate", "base", "offset", "start", "stop", "time")
+        )
 
 
 class AppSrc(BaseElement):
