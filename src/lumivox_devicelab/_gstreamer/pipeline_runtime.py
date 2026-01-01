@@ -36,6 +36,14 @@ class _WorkerContext:
     def wait_cancelled(self, timeout: float | None = None) -> bool:
         return self._runtime._cancel_event.wait(timeout)
 
+    def wait_graph_closed(self, timeout: float | None = None) -> bool:
+        """Wait until graph access is closed and the pipeline has entered NULL."""
+        return self._runtime._graph_closed_event.wait(timeout)
+
+    @property
+    def failure(self) -> PipelineError | None:
+        return self._runtime.failure
+
     def use_graph(self, operation: Callable[[Any], _T]) -> _T:
         graph = self._runtime._get_graph()
         return graph.use(operation)
@@ -43,6 +51,13 @@ class _WorkerContext:
     def stop(self) -> None:
         """Request normal shutdown without waiting for the calling worker."""
         self._runtime.stop()
+
+    def fail(self, message: str, cause: BaseException) -> PipelineError:
+        """Record a worker failure immediately so final callbacks can observe it."""
+        self._runtime._report_failure(message, cause)
+        failure = self._runtime.failure
+        assert failure is not None
+        return failure
 
 
 class _PipelineRuntime:
@@ -74,6 +89,7 @@ class _PipelineRuntime:
         self._cancel_event = Event()
         self._playing_event = Event()
         self._readiness_event = Event()
+        self._graph_closed_event = Event()
         self._teardown_deadline: float | None = None
 
     @property
@@ -328,6 +344,8 @@ class _PipelineRuntime:
 
         if graph is not None:
             self._close_graph(graph)
+        else:
+            self._graph_closed_event.set()
         self._join_workers(deadline)
         if graph is not None:
             self._release_graph(graph)
@@ -340,6 +358,8 @@ class _PipelineRuntime:
             graph = self._graph
         if graph is not None:
             self._close_graph(graph)
+        else:
+            self._graph_closed_event.set()
         self._join_workers(time.monotonic())
         if graph is not None:
             self._release_graph(graph)
@@ -351,6 +371,7 @@ class _PipelineRuntime:
         except Exception as close_error:
             errors = (close_error,)
         self._record_cleanup_errors(errors)
+        self._graph_closed_event.set()
 
     def _release_graph(self, graph: _PipelineGraph) -> None:
         try:
