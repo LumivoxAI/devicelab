@@ -102,6 +102,15 @@ class AppSink(BaseElement):
             return None
         return self._to_packet(sample)
 
+    def validate_negotiated_caps(self) -> bool:
+        """Return false until caps exist and reject an incompatible fixed result."""
+        pad = self.impl.get_static_pad("sink")
+        caps = None if pad is None else pad.get_current_caps()
+        if caps is None or caps.is_empty() or caps.is_any():
+            return False
+        self._validate_caps(caps)
+        return True
+
     def _to_packet(self, sample: Any) -> CapturePacket:
         self._validate_sample_caps(sample)
         buffer = sample.get_buffer()
@@ -156,6 +165,9 @@ class AppSink(BaseElement):
         caps = sample.get_caps()
         if caps is None or caps.is_empty() or caps.is_any():
             raise CapturePacketError(CapturePacketErrorKind.CAPS, "appsink sample has no fixed caps")
+        self._validate_caps(caps)
+
+    def _validate_caps(self, caps: Any) -> None:
         structure = caps.get_structure(0)
         if structure is None:
             raise CapturePacketError(CapturePacketErrorKind.CAPS, "appsink sample caps have no structure")

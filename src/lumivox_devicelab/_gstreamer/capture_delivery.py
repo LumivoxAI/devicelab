@@ -193,7 +193,7 @@ class _CaptureDelivery:
             if worker.cancelled:
                 return None
             try:
-                packet = self._pull_packet(timeout_ms)
+                packet = worker.use_graph(lambda pipeline: self._pull_packet(timeout_ms))
             except CapturePacketError as error:
                 if not self._discard_packet(worker, error):
                     return None
