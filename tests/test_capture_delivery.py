@@ -54,6 +54,9 @@ class FakeWorker:
     def wait_graph_closed(self, timeout: float | None = None) -> bool:
         return self._graph_closed.wait(timeout)
 
+    def use_graph(self, operation: Callable[[object], object]) -> object:
+        return operation(object())
+
 
 class PacketSource:
     def __init__(self, *items: CapturePacket | CapturePacketError) -> None:
