@@ -18,9 +18,18 @@ from .runtime import GStreamerElementError, get_gst
 
 _T = TypeVar("_T")
 _WorkerTarget = Callable[["_WorkerContext"], None]
+_RestartReadiness = Callable[["_WorkerContext"], _T]
+_RestartCommit = Callable[[_T], None]
+_BusErrorHandler = Callable[[object, BaseException], bool]
 
 _BUS_POLL_NS = 100_000_000
 _ASYNC_TEARDOWN_TIMEOUT = 5.0
+_RESTART_STARTUP_TIMEOUT = 10.0
+_GRAPH_IDLE_TIMEOUT = 1.0
+
+
+class _FatalRestartError(GStreamerElementError):
+    """A restart invariant or cleanup failure that must not be retried."""
 
 
 class _WorkerContext:
@@ -59,6 +68,18 @@ class _WorkerContext:
         assert failure is not None
         return failure
 
+    def restart_graph(self, readiness: _RestartReadiness[_T], commit: _RestartCommit[_T] | None = None) -> _T:
+        """Replace the current graph while preserving the public running state."""
+        return self._runtime._restart_graph(self, readiness, commit)
+
+    def begin_callback(self) -> bool:
+        """Linearize a callback start against external stop."""
+        with self._runtime._condition:
+            return self._runtime._state is PipelineState.RUNNING and not self._runtime._cancel_event.is_set()
+
+    def raise_if_restart_aborted(self) -> None:
+        self._runtime._raise_if_restart_aborted()
+
 
 class _PipelineRuntime:
     """Compose deterministic lifecycle around one single-use pipeline graph."""
@@ -71,17 +92,21 @@ class _PipelineRuntime:
         build_graph: Callable[[_PipelineGraph], None] | None = None,
         readiness: _WorkerTarget | None = None,
         on_eos: Callable[[], None] | None = None,
+        on_bus_error: _BusErrorHandler | None = None,
     ) -> None:
         self._logger = logger.bind(module="devicelab")
         self._graph_factory = graph_factory
         self._build_graph = build_graph
         self._readiness = readiness
         self._on_eos = on_eos
+        self._on_bus_error = on_bus_error
 
         self._condition = Condition(Lock())
         self._state = PipelineState.CREATED
         self._failure: PipelineError | None = None
         self._graph: _PipelineGraph | None = None
+        self._graph_pipeline: object | None = None
+        self._retired_graphs: list[_PipelineGraph] = []
         self._worker_targets: list[tuple[str, _WorkerTarget]] = []
         self._workers: list[Thread] = []
         self._worker_ids: set[int] = set()
@@ -91,6 +116,9 @@ class _PipelineRuntime:
         self._readiness_event = Event()
         self._graph_closed_event = Event()
         self._teardown_deadline: float | None = None
+        self._restart_in_progress = False
+        self._restart_error: BaseException | None = None
+        self._restart_error_event = Event()
 
     @property
     def state(self) -> PipelineState:
@@ -174,6 +202,7 @@ class _PipelineRuntime:
         if already_stopped:
             if graph is not None:
                 self._release_graph(graph)
+            self._release_retired_graphs()
             failure = self.failure
             if failure is not None:
                 raise failure
@@ -209,6 +238,7 @@ class _PipelineRuntime:
                     release_immediately = True
                 else:
                     self._graph = graph
+                    self._graph_pipeline = graph.use(lambda pipeline: pipeline)
                     release_immediately = False
             if release_immediately:
                 self._release_graph(graph)
@@ -251,10 +281,13 @@ class _PipelineRuntime:
         finally:
             self._teardown()
 
-    def _wait_for_startup_signal(self, signal: Event) -> None:
+    def _wait_for_startup_signal(self, signal: Event, deadline: float | None = None) -> None:
         while not signal.wait(0.05):
             if self._cancel_event.is_set():
                 return
+            self._raise_if_restart_aborted()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise GStreamerElementError("restarted GStreamer pipeline startup timed out")
 
     def _run_readiness(self, context: _WorkerContext) -> None:
         assert self._readiness is not None
@@ -267,11 +300,22 @@ class _PipelineRuntime:
             gst.MessageType.ERROR | gst.MessageType.WARNING | gst.MessageType.EOS | gst.MessageType.STATE_CHANGED
         )
         while not context.cancelled:
-            message = context.use_graph(
-                lambda pipeline: pipeline.get_bus().timed_pop_filtered(_BUS_POLL_NS, message_types)
-            )
+            try:
+                observed_pipeline, message = context.use_graph(
+                    lambda pipeline: (
+                        pipeline,
+                        pipeline.get_bus().timed_pop_filtered(_BUS_POLL_NS, message_types),
+                    )
+                )
+            except GStreamerElementError:
+                if context.wait_cancelled(0):
+                    return
+                raise
             if message is None:
                 continue
+            with self._condition:
+                if observed_pipeline is not self._graph_pipeline:
+                    continue
             if message.type == gst.MessageType.WARNING:
                 warning, debug = message.parse_warning()
                 self._logger.warning("gstreamer_bus_warning", error=str(warning), debug=debug)
@@ -279,6 +323,9 @@ class _PipelineRuntime:
                 error, debug = message.parse_error()
                 self._logger.error("gstreamer_bus_error", error=str(error), debug=debug)
                 cause = error if isinstance(error, BaseException) else RuntimeError(str(error))
+                if self._on_bus_error is not None and self._on_bus_error(message.src, cause):
+                    self._abort_restart(cause)
+                    continue
                 self._report_failure("GStreamer pipeline bus error", cause)
                 return
             elif message.type == gst.MessageType.EOS:
@@ -286,11 +333,11 @@ class _PipelineRuntime:
                     context.stop()
                 else:
                     self._on_eos()
+                    self._abort_restart(GStreamerElementError("pipeline reached EOS during restart"))
             elif message.type == gst.MessageType.STATE_CHANGED:
                 old, new, pending = message.parse_state_changed()
                 del old, pending
-                is_pipeline = context.use_graph(lambda pipeline: message.src is pipeline)
-                if is_pipeline and new == gst.State.PLAYING:
+                if message.src is observed_pipeline and new == gst.State.PLAYING:
                     self._playing_event.set()
 
     def _launch_worker(self, name: str, target: _WorkerTarget) -> None:
@@ -324,6 +371,132 @@ class _PipelineRuntime:
                 self._failure._add_secondary_error(cause)
             self._request_stop_locked(time.monotonic() + _ASYNC_TEARDOWN_TIMEOUT)
 
+    def report_failure(self, message: str, cause: BaseException) -> None:
+        """Report a fatal error from a non-worker backend callback."""
+        self._report_failure(message, cause)
+
+    def abort_restart(self, cause: BaseException) -> bool:
+        """Abort only an active restart attempt, returning whether one existed."""
+        return self._abort_restart(cause)
+
+    def _abort_restart(self, cause: BaseException) -> bool:
+        with self._condition:
+            if not self._restart_in_progress:
+                return False
+            if self._restart_error is None:
+                self._restart_error = cause
+                self._restart_error_event.set()
+            self._condition.notify_all()
+            return True
+
+    def _raise_if_restart_aborted(self) -> None:
+        with self._condition:
+            error = self._restart_error
+        if error is not None:
+            raise GStreamerElementError("restarted GStreamer pipeline failed") from error
+
+    def _complete_restart_attempt(self, result: _T, commit: _RestartCommit[_T] | None) -> None:
+        with self._condition:
+            error = self._restart_error
+            if error is None:
+                if commit is not None:
+                    commit(result)
+                self._restart_in_progress = False
+        if error is not None:
+            raise GStreamerElementError("restarted GStreamer pipeline failed") from error
+
+    def _restart_graph(
+        self,
+        worker: _WorkerContext,
+        readiness: _RestartReadiness[_T],
+        commit: _RestartCommit[_T] | None,
+    ) -> _T:
+        with self._condition:
+            if self._state is not PipelineState.RUNNING or self._cancel_event.is_set():
+                raise PipelineStateError("microphone recovery was cancelled")
+            old_graph = self._graph
+            self._graph = None
+            self._graph_pipeline = None
+            self._playing_event.clear()
+            self._restart_error = None
+            self._restart_error_event.clear()
+            self._restart_in_progress = True
+            self._condition.notify_all()
+
+        try:
+            if old_graph is not None:
+                self._release_for_restart(old_graph)
+            if worker.cancelled:
+                raise PipelineStateError("microphone recovery was cancelled")
+            graph = self._graph_factory()
+        except Exception:
+            with self._condition:
+                self._restart_in_progress = False
+                self._restart_error = None
+                self._restart_error_event.clear()
+            raise
+        try:
+            if worker.cancelled:
+                raise PipelineStateError("microphone recovery was cancelled")
+            if self._build_graph is not None:
+                self._build_graph(graph)
+            if worker.cancelled:
+                raise PipelineStateError("microphone recovery was cancelled")
+            pipeline = graph.use(lambda pipeline: pipeline)
+            with self._condition:
+                if self._state is not PipelineState.RUNNING or self._cancel_event.is_set():
+                    raise PipelineStateError("microphone recovery was cancelled")
+                self._graph = graph
+                self._graph_pipeline = pipeline
+                self._condition.notify_all()
+            gst = get_gst()
+            result = graph.use(lambda pipeline: pipeline.set_state(gst.State.PLAYING))
+            if result == gst.StateChangeReturn.FAILURE:
+                raise GStreamerElementError("Failed to set restarted GStreamer pipeline to PLAYING")
+            deadline = time.monotonic() + _RESTART_STARTUP_TIMEOUT
+            self._wait_for_startup_signal(self._playing_event, deadline)
+            if worker.cancelled:
+                raise PipelineStateError("microphone recovery was cancelled")
+            result_value = readiness(worker)
+            self._complete_restart_attempt(result_value, commit)
+            return result_value
+        except Exception:
+            with self._condition:
+                if self._graph is graph:
+                    self._graph = None
+                    self._graph_pipeline = None
+                    self._condition.notify_all()
+            self._release_failed_restart(graph)
+            raise
+        finally:
+            with self._condition:
+                self._restart_in_progress = False
+                self._restart_error = None
+                self._restart_error_event.clear()
+
+    def _release_for_restart(self, graph: _PipelineGraph) -> None:
+        errors = graph.close()
+        if not graph.wait_idle(_GRAPH_IDLE_TIMEOUT):
+            self._retire_graph(graph)
+            raise _FatalRestartError("previous GStreamer graph did not become idle")
+        errors = (*errors, *graph.release())
+        if not graph.cleanup_complete:
+            self._retire_graph(graph)
+        if errors:
+            raise _FatalRestartError("failed to release the previous GStreamer graph") from errors[0]
+
+    def _release_failed_restart(self, graph: _PipelineGraph) -> None:
+        errors = graph.close()
+        idle = graph.wait_idle(_GRAPH_IDLE_TIMEOUT)
+        if idle:
+            errors = (*errors, *graph.release())
+        if not graph.cleanup_complete:
+            self._retire_graph(graph)
+        if not idle:
+            raise _FatalRestartError("replacement GStreamer graph did not become idle")
+        if errors:
+            raise _FatalRestartError("failed to release a replacement GStreamer graph") from errors[0]
+
     def _request_stop_locked(self, deadline: float) -> None:
         if self._state in (PipelineState.STARTING, PipelineState.RUNNING):
             self._state = PipelineState.STOPPING
@@ -340,8 +513,10 @@ class _PipelineRuntime:
             if self._state in (PipelineState.STARTING, PipelineState.RUNNING):
                 self._state = PipelineState.STOPPING
             deadline = self._teardown_deadline or (time.monotonic() + _ASYNC_TEARDOWN_TIMEOUT)
+        with self._condition:
             graph = self._graph
-
+            self._graph = None
+            self._graph_pipeline = None
         if graph is not None:
             self._close_graph(graph)
         else:
@@ -349,13 +524,17 @@ class _PipelineRuntime:
         self._join_workers(deadline)
         if graph is not None:
             self._release_graph(graph)
+        self._release_retired_graphs()
         self._complete_stopped()
 
     def _force_terminal(self, timeout_error: PipelineTimeoutError) -> None:
         with self._condition:
             self._record_failure_locked(timeout_error)
             self._request_stop_locked(time.monotonic())
+        with self._condition:
             graph = self._graph
+            self._graph = None
+            self._graph_pipeline = None
         if graph is not None:
             self._close_graph(graph)
         else:
@@ -363,6 +542,7 @@ class _PipelineRuntime:
         self._join_workers(time.monotonic())
         if graph is not None:
             self._release_graph(graph)
+        self._release_retired_graphs()
         self._complete_stopped()
 
     def _close_graph(self, graph: _PipelineGraph) -> None:
@@ -391,6 +571,25 @@ class _PipelineRuntime:
                     self._failure = PipelineError("pipeline graph cleanup failed", cause=error)
                 else:
                     self._failure._add_secondary_error(error)
+
+    def _release_retired_graphs(self) -> None:
+        with self._condition:
+            graphs = tuple(self._retired_graphs)
+            self._retired_graphs.clear()
+        for graph in graphs:
+            self._release_graph(graph)
+
+    def _retire_graph(self, graph: _PipelineGraph) -> None:
+        with self._condition:
+            stopped = self._state is PipelineState.STOPPED
+            if not stopped:
+                self._retired_graphs.append(graph)
+                return
+        if graph.wait_idle(_ASYNC_TEARDOWN_TIMEOUT):
+            self._release_graph(graph)
+        elif not graph.cleanup_complete:
+            with self._condition:
+                self._retired_graphs.append(graph)
 
     def _join_workers(self, deadline: float) -> None:
         caller = current_thread()
@@ -423,6 +622,8 @@ class _PipelineRuntime:
 
     def _get_graph(self) -> _PipelineGraph:
         with self._condition:
+            while self._graph is None and not self._cancel_event.is_set():
+                self._condition.wait(0.05)
             graph = self._graph
         if graph is None:
             raise GStreamerElementError("GStreamer graph is unavailable")

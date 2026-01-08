@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, TypeVar
-from threading import Lock
+from threading import Lock, Condition
 from dataclasses import dataclass
 from collections.abc import Callable
 
@@ -28,11 +28,13 @@ class _PipelineGraph:
     def __init__(self, *, logger: Logger, name: str | None = None) -> None:
         self._logger = logger.bind(module="devicelab")
         self._lock = Lock()
+        self._idle = Condition(self._lock)
         self._cleanup_lock = Lock()
         self._released = False
         self._null_reached = False
         self._elements: list[BaseElement] = []
         self._request_pads: list[_RequestPad] = []
+        self._active_operations = 0
 
         gst = get_gst()
         self._gst = gst
@@ -57,7 +59,18 @@ class _PipelineGraph:
             self._ensure_open()
             assert self._pipeline is not None
             pipeline = self._pipeline
-        return operation(pipeline)
+            self._active_operations += 1
+        try:
+            return operation(pipeline)
+        finally:
+            with self._lock:
+                self._active_operations -= 1
+                self._idle.notify_all()
+
+    def wait_idle(self, timeout: float) -> bool:
+        """Wait for operations admitted before close to leave the graph."""
+        with self._idle:
+            return self._idle.wait_for(lambda: self._active_operations == 0, timeout)
 
     def add(self, *elements: BaseElement) -> None:
         """Add elements and retain ownership of every successful addition."""

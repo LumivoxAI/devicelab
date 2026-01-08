@@ -6,11 +6,14 @@ API is released.
 
 from __future__ import annotations
 
+import time
+from threading import Event, RLock
+
 from lumivox_core.logger import Logger
 
 from lumivox_devicelab.state import PipelineState
 from lumivox_devicelab.errors import PipelineError
-from lumivox_devicelab.capture import CaptureHandler
+from lumivox_devicelab.capture import CaptureContext, CaptureHandler
 from lumivox_devicelab.formats import AudioFormat, ChannelSelection, build_raw_audio_spec
 
 from ._gstreamer.graph import _PipelineGraph
@@ -20,11 +23,13 @@ from ._gstreamer.elements.base import BaseElement
 from ._gstreamer.elements.flow import AudioQueue, QueueOverflowPolicy
 from ._gstreamer.elements.audio import CapsFilter, AudioConvert, AudioResample, SourceChannelCapsFilter
 from ._gstreamer.capture_delivery import _CaptureDelivery, calibrate_capture_context
+from ._gstreamer.capture_recovery import _CaptureHealth, _RestartBudget
 from ._gstreamer.device_discovery import DeviceDirection, resolve_pipewire_target
-from ._gstreamer.pipeline_runtime import _WorkerContext, _PipelineRuntime
+from ._gstreamer.pipeline_runtime import _WorkerContext, _PipelineRuntime, _FatalRestartError
 from ._gstreamer.elements.pipewire import PipeWireSrc
 
 _CAPTURE_QUEUE_TIME_MS = 200
+_RESTART_READINESS_TIMEOUT = 10.0
 
 
 class MicrophoneCapturePipeline:
@@ -58,12 +63,20 @@ class MicrophoneCapturePipeline:
         self._target_object: str | None = None
         self._app_sink: AppSink | None = None
         self._source_caps: SourceChannelCapsFilter | None = None
+        self._pipewire_source: PipeWireSrc | None = None
+        self._generation = 0
+        self._health = _CaptureHealth()
+        self._restart_budget = _RestartBudget()
+        self._recovery_lock = RLock()
+        self._recovery_event = Event()
+        self._recovery_cause: PipelineError | None = None
+        self._recovering = False
 
         self._delivery = _CaptureDelivery(
             logger=self._logger,
             handler=handler,
             pull_packet=self._pull_packet,
-            health_observer=self._fail_packet,
+            health_observer=self._observe_packet_health,
         )
         self._runtime = _PipelineRuntime(
             logger=self._logger,
@@ -71,8 +84,10 @@ class MicrophoneCapturePipeline:
             build_graph=self._build_graph,
             readiness=self._ready,
             on_eos=self._unexpected_eos,
+            on_bus_error=self._handle_bus_error,
         )
         self._runtime.add_worker("capture-delivery", self._delivery.run)
+        self._runtime.add_worker("capture-recovery", self._recover)
 
     @property
     def state(self) -> PipelineState:
@@ -109,6 +124,7 @@ class MicrophoneCapturePipeline:
             name="capture-queue",
         )
         app_sink = AppSink(self._spec, name="capture-sink", policy=AppSinkPolicy.LIVE_DROP)
+        app_sink.observe_caps(self._caps_changed)
 
         elements: list[BaseElement] = [source]
         source_caps = None
@@ -119,6 +135,7 @@ class MicrophoneCapturePipeline:
         graph.add(*elements)
         graph.link(*elements)
         self._source_caps = source_caps
+        self._pipewire_source = source
         self._app_sink = app_sink
 
     def _ready(self, worker: _WorkerContext) -> None:
@@ -131,14 +148,9 @@ class MicrophoneCapturePipeline:
             assert sink is not None
             sink_ready = worker.use_graph(lambda pipeline: sink.validate_negotiated_caps())
             if source_ready and sink_ready:
-                context = worker.use_graph(
-                    lambda pipeline: calibrate_capture_context(
-                        pipeline,
-                        audio_format=self._audio_format,
-                        generation=0,
-                    )
-                )
+                context = self._calibrate(worker, generation=0)
                 self._delivery.activate(worker, context)
+                self._restart_budget.mark_running()
                 return
             worker.wait_cancelled(0.01)
 
@@ -148,10 +160,136 @@ class MicrophoneCapturePipeline:
             raise GStreamerElementError("microphone AppSink is unavailable")
         return sink.try_pull(timeout_ms)
 
-    @staticmethod
-    def _fail_packet(error: CapturePacketError) -> None:
-        raise error
+    def _observe_packet_health(self, error: CapturePacketError) -> None:
+        if self._health.observe(error):
+            self._request_recovery("microphone capture data became unhealthy", error)
 
-    @staticmethod
-    def _unexpected_eos() -> None:
-        raise GStreamerElementError("microphone pipeline reached unexpected EOS")
+    def _caps_changed(self, error: CapturePacketError) -> None:
+        if self.state is PipelineState.STARTING:
+            self._runtime.report_failure("microphone initial caps are incompatible", error)
+        elif self.state is PipelineState.RUNNING:
+            self._request_recovery("microphone caps changed", error)
+
+    def _handle_bus_error(self, source: object, cause: BaseException) -> bool:
+        pipewire_source = self._pipewire_source
+        if self.state is not PipelineState.RUNNING or pipewire_source is None or source is not pipewire_source.impl:
+            return False
+        self._request_recovery("microphone source failed", cause)
+        return True
+
+    def _unexpected_eos(self) -> None:
+        if self.state is not PipelineState.RUNNING:
+            raise GStreamerElementError("microphone pipeline reached unexpected EOS during startup")
+        self._request_recovery(
+            "microphone pipeline reached unexpected EOS",
+            GStreamerElementError("microphone pipeline reached unexpected EOS"),
+        )
+
+    def _request_recovery(self, message: str, cause: BaseException) -> None:
+        recovery_cause = cause if isinstance(cause, PipelineError) else PipelineError(message, cause=cause)
+        with self._recovery_lock:
+            recovering = self._recovering
+        if recovering and self._runtime.abort_restart(cause):
+            self._logger.warning("microphone_recovery_trigger_ignored", error=str(cause))
+            return
+        with self._recovery_lock:
+            if self._recovery_cause is not None:
+                self._logger.warning("microphone_recovery_trigger_ignored", error=str(cause))
+                return
+            self._recovery_cause = recovery_cause
+            self._recovery_event.set()
+            self._restart_budget.begin_recovery()
+        self._delivery.force_discontinuity()
+        self._logger.warning("microphone_recovery_requested", error=str(cause))
+
+    def _recover(self, worker: _WorkerContext) -> None:
+        while not worker.cancelled:
+            if not self._recovery_event.wait(0.05):
+                continue
+            with self._recovery_lock:
+                cause = self._recovery_cause
+                self._recovery_cause = None
+                self._recovery_event.clear()
+                self._recovering = cause is not None
+            if cause is None:
+                continue
+            if not self._delivery.pause(worker):
+                return
+
+            last_error: BaseException = cause
+            while not worker.cancelled:
+                delay = self._restart_budget.next_delay()
+                if delay is None:
+                    worker.fail("microphone recovery attempts exhausted", last_error)
+                    return
+                self._logger.warning("microphone_restart_scheduled", delay_seconds=delay, error=str(last_error))
+                if worker.wait_cancelled(delay):
+                    return
+                try:
+                    next_generation = self._generation + 1
+                    completed_events: list[Event] = []
+                    context = worker.restart_graph(
+                        lambda restart_worker: self._wait_for_restart_ready(restart_worker, next_generation),
+                        lambda restarted_context: completed_events.append(
+                            self._commit_restart(restarted_context, cause)
+                        ),
+                    )
+                except _FatalRestartError as error:
+                    worker.fail("microphone restart cleanup failed", error)
+                    return
+                except Exception as error:
+                    if worker.wait_cancelled(0):
+                        return
+                    last_error = error
+                    self._logger.warning("microphone_restart_failed", error=str(error))
+                    continue
+
+                del context
+                if not completed_events:
+                    raise RuntimeError("successful microphone restart was not committed")
+                completed = completed_events[0]
+                with self._recovery_lock:
+                    self._recovering = False
+                self._delivery.resume()
+                while not completed.wait(0.01):
+                    if worker.wait_cancelled(0):
+                        return
+                if worker.cancelled or worker.failure is not None:
+                    return
+                self._logger.info("microphone_restarted", generation=next_generation)
+                break
+
+    def _commit_restart(self, context: CaptureContext, cause: PipelineError) -> Event:
+        completed = self._delivery.restart(context, cause)
+        self._generation = context.generation
+        self._health.clear()
+        self._restart_budget.mark_running()
+        return completed
+
+    def _wait_for_restart_ready(self, worker: _WorkerContext, generation: int) -> CaptureContext:
+        deadline = time.monotonic() + _RESTART_READINESS_TIMEOUT
+        while not worker.cancelled:
+            worker.raise_if_restart_aborted()
+            source_caps = self._source_caps
+            source_ready = source_caps is None or worker.use_graph(
+                lambda pipeline: source_caps.validate_negotiated_caps()
+            )
+            sink = self._app_sink
+            if sink is None:
+                raise GStreamerElementError("microphone AppSink is unavailable")
+            sink_ready = worker.use_graph(lambda pipeline: sink.validate_negotiated_caps())
+            if source_ready and sink_ready:
+                return self._calibrate(worker, generation=generation)
+            if time.monotonic() >= deadline:
+                raise GStreamerElementError("restarted microphone caps negotiation timed out")
+            worker.wait_cancelled(0.01)
+        raise PipelineError("microphone restart was cancelled")
+
+    def _calibrate(self, worker: _WorkerContext, *, generation: int) -> CaptureContext:
+        return worker.use_graph(
+            lambda pipeline: calibrate_capture_context(
+                pipeline,
+                audio_format=self._audio_format,
+                generation=generation,
+            )
+        )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from enum import Enum, IntFlag
 from typing import TYPE_CHECKING, Any
 from dataclasses import dataclass
+from collections.abc import Callable
 
 import numpy as np
 
@@ -110,6 +111,26 @@ class AppSink(BaseElement):
             return False
         self._validate_caps(caps)
         return True
+
+    def observe_caps(self, incompatible: Callable[[CapturePacketError], None]) -> None:
+        """Observe incompatible renegotiation without adding work to the buffer hot path."""
+        gst = get_gst()
+        pad = self.impl.get_static_pad("sink")
+        if pad is None:
+            raise GStreamerElementError("appsink has no sink pad")
+
+        def probe(pad: Any, info: Any) -> Any:
+            del pad
+            event = info.get_event()
+            if event is not None and event.type == gst.EventType.CAPS:
+                caps = event.parse_caps()
+                try:
+                    self._validate_caps(caps)
+                except CapturePacketError as error:
+                    incompatible(error)
+            return gst.PadProbeReturn.OK
+
+        pad.add_probe(gst.PadProbeType.EVENT_DOWNSTREAM, probe)
 
     def _to_packet(self, sample: Any) -> CapturePacket:
         self._validate_sample_caps(sample)

@@ -88,10 +88,13 @@ class _CaptureDelivery:
         self._activation = Event()
         self._started = Event()
         self._eos = Event()
+        self._pause_requested = Event()
+        self._paused = Event()
         self._initial_context: CaptureContext | None = None
         self._current_context: CaptureContext | None = None
         self._pending_generation: _GenerationChange | None = None
         self._force_discontinuity = False
+        self._finished = False
 
     def activate(self, worker: _WorkerContext, context: CaptureContext) -> None:
         """Readiness hook that waits until on_start has completed."""
@@ -113,10 +116,23 @@ class _CaptureDelivery:
         with self._lock:
             self._force_discontinuity = True
 
+    def pause(self, worker: _WorkerContext) -> bool:
+        """Stop graph pulls at a packet boundary before graph replacement."""
+        self._pause_requested.set()
+        while not self._paused.wait(0.01):
+            if worker.cancelled:
+                return False
+        return True
+
+    def resume(self) -> None:
+        self._pause_requested.clear()
+
     def restart(self, context: CaptureContext, cause: PipelineError) -> Event:
         """Schedule on_restart before any packet from the new generation."""
         completed = Event()
         with self._lock:
+            if self._finished:
+                raise RuntimeError("capture delivery has already stopped")
             current = self._current_context
             if current is None:
                 raise RuntimeError("capture delivery has not started")
@@ -146,6 +162,13 @@ class _CaptureDelivery:
         self._started.set()
 
         while not worker.cancelled:
+            if self._pause_requested.is_set():
+                self._paused.set()
+                while self._pause_requested.is_set():
+                    if worker.wait_cancelled(0.01):
+                        break
+                self._paused.clear()
+                continue
             if not self._apply_generation_change(worker):
                 break
             packets = self._pull_batch(worker)
@@ -161,7 +184,14 @@ class _CaptureDelivery:
 
         worker.wait_graph_closed()
         with self._lock:
+            self._finished = True
             final_context = self._current_context
+            pending = self._pending_generation
+            self._pending_generation = None
+            if pending is not None:
+                final_context = pending.context
+                self._current_context = pending.context
+                pending.completed.set()
         assert final_context is not None
         try:
             self._handler.on_stop(final_context, worker.failure)
@@ -174,15 +204,21 @@ class _CaptureDelivery:
             self._pending_generation = None
         if change is None:
             return True
+        with self._lock:
+            self._current_context = change.context
+            self._force_discontinuity = True
+        if worker.cancelled:
+            change.completed.set()
+            return False
+        if not worker.begin_callback():
+            change.completed.set()
+            return False
         try:
             self._handler.on_restart(change.context, change.cause)
         except Exception as error:
             worker.fail("capture handler on_restart failed", error)
             change.completed.set()
             return False
-        with self._lock:
-            self._current_context = change.context
-            self._force_discontinuity = True
         change.completed.set()
         return True
 
@@ -192,6 +228,8 @@ class _CaptureDelivery:
         for _ in range(self._max_batch_packets):
             if worker.cancelled:
                 return None
+            if self._pause_requested.is_set():
+                return []
             try:
                 packet = worker.use_graph(lambda pipeline: self._pull_packet(timeout_ms))
             except CapturePacketError as error:
