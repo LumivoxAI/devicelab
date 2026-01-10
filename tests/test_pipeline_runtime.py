@@ -98,6 +98,10 @@ class FakeGraph:
         self.released.set()
         return ()
 
+    def wait_idle(self, timeout: float) -> bool:
+        del timeout
+        return True
+
     def release(self) -> tuple[BaseException, ...]:
         with self._lock:
             self.released.set()
@@ -509,6 +513,160 @@ def test_partial_build_failure_is_cleaned_by_runtime(monkeypatch: pytest.MonkeyP
     assert raised.value.__cause__ is original
     assert seen_graph == [cast(_PipelineGraph, graph)]
     assert graph.cleanup_complete
+
+
+def test_worker_can_replace_graph_without_leaving_running_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    gst = _gst()
+    monkeypatch.setattr(runtime_module, "get_gst", lambda: gst)
+    first = FakeGraph(FakePipeline(gst))
+    second = FakeGraph(FakePipeline(gst))
+    graphs = iter((first, second))
+    restarted = Event()
+    states: list[PipelineState] = []
+    runtime = _PipelineRuntime(
+        logger=Mock(bind=Mock(return_value=Mock())),
+        graph_factory=lambda: cast(_PipelineGraph, next(graphs)),
+    )
+
+    def recovery(context: _WorkerContext) -> None:
+        while not restarted.wait(0.01):
+            if context.cancelled:
+                return
+        context.restart_graph(lambda worker: states.append(runtime.state))
+
+    runtime.add_worker("recovery", recovery)
+    runtime.start()
+    restarted.set()
+    deadline = time.monotonic() + 1
+    while not states and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+    assert first.cleanup_complete
+    assert states == [PipelineState.RUNNING]
+    assert runtime.state is PipelineState.RUNNING
+    runtime.stop()
+    assert second.cleanup_complete
+
+
+def test_second_restart_attempt_builds_a_fresh_graph_after_first_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    gst = _gst()
+    monkeypatch.setattr(runtime_module, "get_gst", lambda: gst)
+    initial = FakeGraph(FakePipeline(gst))
+    failed = FakeGraph(FakePipeline(gst, state_result=gst.StateChangeReturn.FAILURE))
+    recovered = FakeGraph(FakePipeline(gst))
+    graphs = iter((initial, failed, recovered))
+    trigger = Event()
+    completed = Event()
+    attempt_errors: list[BaseException] = []
+    runtime = _PipelineRuntime(
+        logger=Mock(bind=Mock(return_value=Mock())),
+        graph_factory=lambda: cast(_PipelineGraph, next(graphs)),
+    )
+
+    def recovery(context: _WorkerContext) -> None:
+        assert trigger.wait(1)
+        try:
+            context.restart_graph(lambda worker: None)
+        except GStreamerElementError as error:
+            attempt_errors.append(error)
+        context.restart_graph(lambda worker: None)
+        completed.set()
+
+    runtime.add_worker("recovery", recovery)
+    runtime.start()
+    trigger.set()
+    assert completed.wait(1)
+
+    assert len(attempt_errors) == 1
+    assert initial.cleanup_complete
+    assert failed.cleanup_complete
+    assert runtime.state is PipelineState.RUNNING
+    runtime.stop()
+    assert recovered.cleanup_complete
+
+
+def test_stop_remains_bounded_while_replacement_factory_is_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    gst = _gst()
+    monkeypatch.setattr(runtime_module, "get_gst", lambda: gst)
+    initial = FakeGraph(FakePipeline(gst))
+    replacement = FakeGraph(FakePipeline(gst))
+    factory_entered = Event()
+    release_factory = Event()
+    calls = 0
+
+    def graph_factory() -> _PipelineGraph:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return cast(_PipelineGraph, initial)
+        factory_entered.set()
+        assert release_factory.wait(1)
+        return cast(_PipelineGraph, replacement)
+
+    trigger = Event()
+    runtime = _PipelineRuntime(logger=Mock(bind=Mock(return_value=Mock())), graph_factory=graph_factory)
+
+    def recovery(context: _WorkerContext) -> None:
+        assert trigger.wait(1)
+        try:
+            context.restart_graph(lambda worker: None)
+        except PipelineStateError:
+            return
+
+    runtime.add_worker("recovery", recovery)
+    runtime.start()
+    trigger.set()
+    assert factory_entered.wait(1)
+    started = time.monotonic()
+    try:
+        with pytest.raises(PipelineTimeoutError):
+            runtime.stop(timeout=0.05)
+        assert time.monotonic() - started < 0.5
+        assert runtime.state is PipelineState.STOPPED
+    finally:
+        release_factory.set()
+    deadline = time.monotonic() + 1
+    while not replacement.cleanup_complete and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert replacement.cleanup_complete
+
+
+def test_handled_bus_error_aborts_active_restart_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    gst = _gst()
+    monkeypatch.setattr(runtime_module, "get_gst", lambda: gst)
+    initial = FakeGraph(FakePipeline(gst))
+    replacement = FakeGraph(FakePipeline(gst, announce_playing=False))
+    graphs = iter((initial, replacement))
+    trigger = Event()
+    attempt_finished = Event()
+    errors: list[BaseException] = []
+    runtime = _PipelineRuntime(
+        logger=Mock(bind=Mock(return_value=Mock())),
+        graph_factory=lambda: cast(_PipelineGraph, next(graphs)),
+        on_bus_error=lambda source, cause: True,
+    )
+
+    def recovery(context: _WorkerContext) -> None:
+        assert trigger.wait(1)
+        try:
+            context.restart_graph(lambda worker: None)
+        except GStreamerElementError as error:
+            errors.append(error)
+        attempt_finished.set()
+
+    runtime.add_worker("recovery", recovery)
+    runtime.start()
+    trigger.set()
+    assert replacement.pipeline.playing_requested.wait(1)
+    message = FakeMessage(gst.MessageType.ERROR, source=object(), error="replacement source failed")
+    replacement.pipeline.bus.push(message)
+    assert attempt_finished.wait(1)
+
+    assert len(errors) == 1
+    assert errors[0].__cause__ is message.parsed_error
+    assert replacement.cleanup_complete
+    assert runtime.state is PipelineState.RUNNING
+    runtime.stop()
 
 
 @pytest.mark.gstreamer(factories=("fakesrc", "fakesink"))

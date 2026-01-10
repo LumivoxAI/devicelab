@@ -43,6 +43,12 @@ class FakeWorker:
         self._cancelled.set()
         self._graph_closed.set()
 
+    def wait_cancelled(self, timeout: float | None = None) -> bool:
+        return self._cancelled.wait(timeout)
+
+    def begin_callback(self) -> bool:
+        return not self.cancelled
+
     def fail(self, message: str, cause: BaseException) -> PipelineError:
         if self._failure is None:
             self._failure = PipelineError(message, cause=cause)
@@ -241,6 +247,25 @@ def test_restart_updates_context_before_chunks_and_marks_first_boundary() -> Non
     assert handler.events == ["start:0", "restart:1", "chunk:1", "stop:1"]
     assert handler.chunks[0].generation == 1
     assert handler.chunks[0].discontinuity
+
+
+def test_pause_prevents_pulls_and_cancellation_suppresses_pending_restart_callback() -> None:
+    source = PacketSource()
+    worker = FakeWorker([])
+    handler = RecordingHandler()
+    delivery, thread = _delivery(handler, source, worker)
+
+    assert delivery.pause(cast(_WorkerContext, worker))
+    pulls_when_paused = source.pulls
+    completed = delivery.restart(_context(1), PipelineError("device failed"))
+    worker.stop()
+    delivery.resume()
+    thread.join(1)
+
+    assert not thread.is_alive()
+    assert source.pulls == pulls_when_paused
+    assert completed.is_set()
+    assert handler.events == ["start:0", "stop:1"]
 
 
 def test_eos_delivers_tail_and_on_stop_runs_after_graph_null_on_same_worker() -> None:

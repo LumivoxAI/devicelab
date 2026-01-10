@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import numpy as np
@@ -127,6 +128,44 @@ def test_appsink_rejects_caps_mismatch() -> None:
     with pytest.raises(CapturePacketError, match="caps do not match") as raised:
         _app_sink(spec)._to_packet(sample)
     assert raised.value.kind is CapturePacketErrorKind.CAPS
+
+
+def test_appsink_caps_probe_reports_only_incompatible_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    callback: Any = None
+
+    class FakePad:
+        def add_probe(self, probe_type: object, probe: object) -> None:
+            nonlocal callback
+            del probe_type
+            callback = probe
+
+    gst = SimpleNamespace(
+        EventType=SimpleNamespace(CAPS=1),
+        PadProbeType=SimpleNamespace(EVENT_DOWNSTREAM=2),
+        PadProbeReturn=SimpleNamespace(OK=3),
+    )
+    monkeypatch.setattr(app, "get_gst", lambda: gst)
+    sink = _app_sink(RawAudioSpec(rate=16_000, channels=1))
+    sink._impl = SimpleNamespace(get_static_pad=lambda name: FakePad())
+    incompatible = Mock()
+    sink.observe_caps(incompatible)
+    assert callable(callback)
+
+    compatible_event = SimpleNamespace(
+        type=gst.EventType.CAPS,
+        parse_caps=lambda: FakeCaps(FakeStructure(rate=16_000, channels=1)),
+    )
+    incompatible_event = SimpleNamespace(
+        type=gst.EventType.CAPS,
+        parse_caps=lambda: FakeCaps(FakeStructure(rate=48_000, channels=1)),
+    )
+    info = SimpleNamespace(get_event=lambda: compatible_event)
+    callback(None, info)
+    info.get_event = lambda: incompatible_event
+    callback(None, info)
+
+    error = incompatible.call_args.args[0]
+    assert error.kind is CapturePacketErrorKind.CAPS
 
 
 def test_appsink_rejects_sample_without_buffer() -> None:
