@@ -21,6 +21,7 @@ _WorkerTarget = Callable[["_WorkerContext"], None]
 _RestartReadiness = Callable[["_WorkerContext"], _T]
 _RestartCommit = Callable[[_T], None]
 _BusErrorHandler = Callable[[object, BaseException], bool]
+_GraphFinalizer = Callable[[_PipelineGraph, float], None]
 
 _BUS_POLL_NS = 100_000_000
 _ASYNC_TEARDOWN_TIMEOUT = 5.0
@@ -93,6 +94,7 @@ class _PipelineRuntime:
         readiness: _WorkerTarget | None = None,
         on_eos: Callable[[], None] | None = None,
         on_bus_error: _BusErrorHandler | None = None,
+        finalize_graph: _GraphFinalizer | None = None,
     ) -> None:
         self._logger = logger.bind(module="devicelab")
         self._graph_factory = graph_factory
@@ -100,6 +102,7 @@ class _PipelineRuntime:
         self._readiness = readiness
         self._on_eos = on_eos
         self._on_bus_error = on_bus_error
+        self._finalize_graph = finalize_graph
 
         self._condition = Condition(Lock())
         self._state = PipelineState.CREATED
@@ -119,6 +122,8 @@ class _PipelineRuntime:
         self._restart_in_progress = False
         self._restart_error: BaseException | None = None
         self._restart_error_event = Event()
+        self._finalizer_threads: dict[_PipelineGraph, Thread] = {}
+        self._closed_graphs: set[_PipelineGraph] = set()
 
     @property
     def state(self) -> PipelineState:
@@ -475,25 +480,50 @@ class _PipelineRuntime:
                 self._restart_error_event.clear()
 
     def _release_for_restart(self, graph: _PipelineGraph) -> None:
+        if not graph.wait_idle(_GRAPH_IDLE_TIMEOUT):
+            graph.close()
+            self._mark_graph_closed(graph)
+            self._retire_graph(graph)
+            raise _FatalRestartError("previous GStreamer graph did not become idle before finalization")
+        finalization_error = self._finalize_before_close(graph, time.monotonic() + _ASYNC_TEARDOWN_TIMEOUT)
         errors = graph.close()
+        self._mark_graph_closed(graph)
+        finalizer_stopped = self._wait_finalizer_after_close(graph)
         if not graph.wait_idle(_GRAPH_IDLE_TIMEOUT):
             self._retire_graph(graph)
             raise _FatalRestartError("previous GStreamer graph did not become idle")
-        errors = (*errors, *graph.release())
+        if finalizer_stopped:
+            errors = (*errors, *graph.release())
+        else:
+            self._retire_graph(graph)
         if not graph.cleanup_complete:
             self._retire_graph(graph)
+        if finalization_error is not None:
+            raise _FatalRestartError("failed to finalize the previous GStreamer graph") from finalization_error
         if errors:
             raise _FatalRestartError("failed to release the previous GStreamer graph") from errors[0]
 
     def _release_failed_restart(self, graph: _PipelineGraph) -> None:
+        if not graph.wait_idle(_GRAPH_IDLE_TIMEOUT):
+            graph.close()
+            self._mark_graph_closed(graph)
+            self._retire_graph(graph)
+            raise _FatalRestartError("replacement GStreamer graph did not become idle before finalization")
+        finalization_error = self._finalize_before_close(graph, time.monotonic() + _ASYNC_TEARDOWN_TIMEOUT)
         errors = graph.close()
+        self._mark_graph_closed(graph)
+        finalizer_stopped = self._wait_finalizer_after_close(graph)
         idle = graph.wait_idle(_GRAPH_IDLE_TIMEOUT)
-        if idle:
+        if idle and finalizer_stopped:
             errors = (*errors, *graph.release())
         if not graph.cleanup_complete:
             self._retire_graph(graph)
         if not idle:
             raise _FatalRestartError("replacement GStreamer graph did not become idle")
+        if not finalizer_stopped:
+            raise _FatalRestartError("replacement GStreamer graph finalizer did not stop")
+        if finalization_error is not None:
+            raise _FatalRestartError("failed to finalize a replacement GStreamer graph") from finalization_error
         if errors:
             raise _FatalRestartError("failed to release a replacement GStreamer graph") from errors[0]
 
@@ -515,15 +545,28 @@ class _PipelineRuntime:
             deadline = self._teardown_deadline or (time.monotonic() + _ASYNC_TEARDOWN_TIMEOUT)
         with self._condition:
             graph = self._graph
-            self._graph = None
-            self._graph_pipeline = None
         if graph is not None:
+            idle = graph.wait_idle(max(0.0, deadline - time.monotonic()))
+            finalization_error = (
+                self._finalize_before_close(graph, deadline)
+                if idle
+                else PipelineTimeoutError("pipeline graph did not become idle before finalization")
+            )
+            if finalization_error is not None:
+                self._record_cleanup_errors((finalization_error,))
+            with self._condition:
+                if self._graph is graph:
+                    self._graph = None
+                    self._graph_pipeline = None
             self._close_graph(graph)
         else:
             self._graph_closed_event.set()
         self._join_workers(deadline)
         if graph is not None:
-            self._release_graph(graph)
+            if self._wait_finalizer_after_close(graph):
+                self._release_graph(graph)
+            else:
+                self._retire_graph(graph)
         self._release_retired_graphs()
         self._complete_stopped()
 
@@ -535,14 +578,22 @@ class _PipelineRuntime:
             graph = self._graph
             self._graph = None
             self._graph_pipeline = None
-        if graph is not None:
-            self._close_graph(graph)
-        else:
+            graphs = (
+                tuple(dict.fromkeys((graph, *self._finalizer_threads.keys())))
+                if graph is not None
+                else tuple(self._finalizer_threads.keys())
+            )
+        for owned_graph in graphs:
+            self._close_graph(owned_graph)
+        if not graphs:
             self._graph_closed_event.set()
         self._join_workers(time.monotonic())
-        if graph is not None:
-            self._release_graph(graph)
-        self._release_retired_graphs()
+        for owned_graph in graphs:
+            if self._wait_finalizer_after_close(owned_graph, timeout=0.0):
+                self._release_graph(owned_graph)
+            else:
+                self._retire_graph(owned_graph)
+        self._release_retired_graphs(timeout=0.0)
         self._complete_stopped()
 
     def _close_graph(self, graph: _PipelineGraph) -> None:
@@ -551,7 +602,55 @@ class _PipelineRuntime:
         except Exception as close_error:
             errors = (close_error,)
         self._record_cleanup_errors(errors)
+        self._mark_graph_closed(graph)
         self._graph_closed_event.set()
+
+    def _mark_graph_closed(self, graph: _PipelineGraph) -> None:
+        with self._condition:
+            self._closed_graphs.add(graph)
+
+    def _finalize_before_close(self, graph: _PipelineGraph, deadline: float) -> BaseException | None:
+        if self._finalize_graph is None:
+            return None
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                assert self._finalize_graph is not None
+                self._finalize_graph(graph, deadline)
+            except Exception as error:
+                errors.append(error)
+            finally:
+                with self._condition:
+                    self._finalizer_threads.pop(graph, None)
+                    closed = graph in self._closed_graphs
+                    if closed:
+                        self._retired_graphs = [retired for retired in self._retired_graphs if retired is not graph]
+                if closed:
+                    self._release_graph(graph)
+
+        thread = Thread(target=run, name="devicelab-graph-finalizer", daemon=False)
+        with self._condition:
+            self._finalizer_threads[graph] = thread
+            thread.start()
+        thread.join(max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            return PipelineTimeoutError("pipeline graph finalization timed out")
+        with self._condition:
+            self._finalizer_threads.pop(graph, None)
+        return errors[0] if errors else None
+
+    def _wait_finalizer_after_close(self, graph: _PipelineGraph, *, timeout: float = _GRAPH_IDLE_TIMEOUT) -> bool:
+        with self._condition:
+            thread = self._finalizer_threads.get(graph)
+        if thread is None:
+            return True
+        thread.join(timeout)
+        if thread.is_alive():
+            return False
+        with self._condition:
+            self._finalizer_threads.pop(graph, None)
+        return True
 
     def _release_graph(self, graph: _PipelineGraph) -> None:
         try:
@@ -561,6 +660,7 @@ class _PipelineRuntime:
         self._record_cleanup_errors(errors)
         if graph.cleanup_complete:
             with self._condition:
+                self._closed_graphs.discard(graph)
                 if self._graph is graph:
                     self._graph = None
 
@@ -568,28 +668,38 @@ class _PipelineRuntime:
         with self._condition:
             for error in errors:
                 if self._failure is None:
-                    self._failure = PipelineError("pipeline graph cleanup failed", cause=error)
+                    self._failure = (
+                        error
+                        if isinstance(error, PipelineError)
+                        else PipelineError("pipeline graph cleanup failed", cause=error)
+                    )
                 else:
                     self._failure._add_secondary_error(error)
 
-    def _release_retired_graphs(self) -> None:
+    def _release_retired_graphs(self, *, timeout: float = _GRAPH_IDLE_TIMEOUT) -> None:
         with self._condition:
             graphs = tuple(self._retired_graphs)
             self._retired_graphs.clear()
         for graph in graphs:
-            self._release_graph(graph)
+            if self._wait_finalizer_after_close(graph, timeout=timeout) and graph.wait_idle(timeout):
+                self._release_graph(graph)
+            elif not graph.cleanup_complete:
+                with self._condition:
+                    self._retired_graphs.append(graph)
 
     def _retire_graph(self, graph: _PipelineGraph) -> None:
         with self._condition:
             stopped = self._state is PipelineState.STOPPED
             if not stopped:
-                self._retired_graphs.append(graph)
+                if graph not in self._retired_graphs:
+                    self._retired_graphs.append(graph)
                 return
-        if graph.wait_idle(_ASYNC_TEARDOWN_TIMEOUT):
+        if self._wait_finalizer_after_close(graph) and graph.wait_idle(_ASYNC_TEARDOWN_TIMEOUT):
             self._release_graph(graph)
         elif not graph.cleanup_complete:
             with self._condition:
-                self._retired_graphs.append(graph)
+                if graph not in self._retired_graphs:
+                    self._retired_graphs.append(graph)
 
     def _join_workers(self, deadline: float) -> None:
         caller = current_thread()
@@ -625,7 +735,8 @@ class _PipelineRuntime:
             while self._graph is None and not self._cancel_event.is_set():
                 self._condition.wait(0.05)
             graph = self._graph
-        if graph is None:
+            cancelled = self._cancel_event.is_set()
+        if graph is None or cancelled:
             raise GStreamerElementError("GStreamer graph is unavailable")
         return graph
 

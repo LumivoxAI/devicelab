@@ -15,11 +15,13 @@ monotonic deadline; `wait()` только наблюдает terminal completion
 Control thread выполняет teardown в следующем порядке:
 
 1. Устанавливает cancellation signal.
-2. Закрывает graph для новых операций и переводит pipeline в `NULL`, чтобы
+2. Вызывает optional pipeline-specific finalizer с оставшимся общим deadline.
+   Recording pipeline использует его для branch-local EOS и завершения encoder.
+3. Закрывает graph для новых операций и переводит pipeline в `NULL`, чтобы
    разблокировать уже начатые media-вызовы.
-3. Ограниченно ожидает supervised workers.
-4. Освобождает request pads и элементы.
-5. Публикует `stopped` и сохранённый failure.
+4. Ограниченно ожидает supervised workers.
+5. Освобождает request pads и элементы.
+6. Публикует `stopped` и сохранённый failure.
 
 Worker, вызвавший `stop()`, только отправляет запрос control thread и не ожидает
 самого себя. Все workers non-daemon. Если callback не возвращается, timeout всё

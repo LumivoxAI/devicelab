@@ -7,6 +7,8 @@ API is released.
 from __future__ import annotations
 
 import time
+from os import PathLike
+from pathlib import Path
 from threading import Event, RLock
 
 from lumivox_core.logger import Logger
@@ -18,9 +20,10 @@ from lumivox_devicelab.formats import AudioFormat, ChannelSelection, build_raw_a
 
 from ._gstreamer.graph import _PipelineGraph
 from ._gstreamer.runtime import GStreamerElementError
+from ._gstreamer.recording import _RecordingError, _RecordingBranch, recording_segment_path, validate_recording_path
 from ._gstreamer.elements.app import AppSink, AppSinkPolicy, CapturePacket, CapturePacketError
 from ._gstreamer.elements.base import BaseElement
-from ._gstreamer.elements.flow import AudioQueue, QueueOverflowPolicy
+from ._gstreamer.elements.flow import Tee, AudioQueue, QueueOverflowPolicy
 from ._gstreamer.elements.audio import CapsFilter, AudioConvert, AudioResample, SourceChannelCapsFilter
 from ._gstreamer.capture_delivery import _CaptureDelivery, calibrate_capture_context
 from ._gstreamer.capture_recovery import _CaptureHealth, _RestartBudget
@@ -43,6 +46,8 @@ class MicrophoneCapturePipeline:
         audio_format: AudioFormat,
         device_id: str,
         channel_selection: ChannelSelection | None = None,
+        record_to: str | PathLike[str] | None = None,
+        overwrite: bool = False,
     ) -> None:
         if not isinstance(handler, CaptureHandler):
             raise TypeError("handler must be a CaptureHandler")
@@ -54,12 +59,25 @@ class MicrophoneCapturePipeline:
             raise ValueError("device_id must not be empty")
         if channel_selection is not None and not isinstance(channel_selection, ChannelSelection):
             raise TypeError("channel_selection must be a ChannelSelection or None")
+        if not isinstance(overwrite, bool):
+            raise TypeError("overwrite must be a bool")
+        if record_to is None:
+            if overwrite:
+                raise ValueError("overwrite=True requires record_to")
+            recording_path = None
+        else:
+            recording_path = validate_recording_path(record_to, overwrite=overwrite)
 
         self._logger = logger.bind(module="devicelab")
         self._audio_format = audio_format
         self._device_id = device_id
         self._spec = build_raw_audio_spec(audio_format, channel_selection)
         self._channel_selection = channel_selection
+        self._recording_path: Path | None = recording_path
+        self._overwrite = overwrite
+        self._building_generation = 0
+        self._recordings: dict[_PipelineGraph, _RecordingBranch] = {}
+        self._recording_lock = RLock()
         self._target_object: str | None = None
         self._app_sink: AppSink | None = None
         self._source_caps: SourceChannelCapsFilter | None = None
@@ -85,6 +103,7 @@ class MicrophoneCapturePipeline:
             readiness=self._ready,
             on_eos=self._unexpected_eos,
             on_bus_error=self._handle_bus_error,
+            finalize_graph=self._finalize_graph,
         )
         self._runtime.add_worker("capture-delivery", self._delivery.run)
         self._runtime.add_worker("capture-recovery", self._recover)
@@ -118,7 +137,7 @@ class MicrophoneCapturePipeline:
         convert = AudioConvert(self._spec, name="convert")
         resample = AudioResample(name="resample")
         normalized_caps = CapsFilter(self._spec, name="normalized-caps")
-        queue = AudioQueue(
+        capture_queue = AudioQueue(
             max_time_ms=_CAPTURE_QUEUE_TIME_MS,
             overflow_policy=QueueOverflowPolicy.DROP_OLD,
             name="capture-queue",
@@ -131,9 +150,28 @@ class MicrophoneCapturePipeline:
         if self._channel_selection is not None:
             source_caps = SourceChannelCapsFilter(self._channel_selection.source_channels, name="source-channels")
             elements.append(source_caps)
-        elements.extend((convert, resample, normalized_caps, queue, app_sink))
-        graph.add(*elements)
-        graph.link(*elements)
+        elements.extend((convert, resample, normalized_caps))
+        recording_path = self._recording_path
+        if recording_path is None:
+            elements.extend((capture_queue, app_sink))
+            graph.add(*elements)
+            graph.link(*elements)
+        else:
+            tee = Tee(name="normalized-tee")
+            elements.append(tee)
+            graph.add(*elements, capture_queue, app_sink)
+            graph.link(*elements)
+            graph.branch(tee, capture_queue, app_sink)
+            segment_path = recording_segment_path(recording_path, self._building_generation)
+            recording = _RecordingBranch.build(
+                graph=graph,
+                tee=tee,
+                logger=self._logger,
+                path=segment_path,
+                overwrite=self._overwrite,
+            )
+            with self._recording_lock:
+                self._recordings[graph] = recording
         self._source_caps = source_caps
         self._pipewire_source = source
         self._app_sink = app_sink
@@ -149,6 +187,7 @@ class MicrophoneCapturePipeline:
             sink_ready = worker.use_graph(lambda pipeline: sink.validate_negotiated_caps())
             if source_ready and sink_ready:
                 context = self._calibrate(worker, generation=0)
+                self._mark_recording_active()
                 self._delivery.activate(worker, context)
                 self._restart_budget.mark_running()
                 return
@@ -227,6 +266,7 @@ class MicrophoneCapturePipeline:
                     return
                 try:
                     next_generation = self._generation + 1
+                    self._building_generation = next_generation
                     completed_events: list[Event] = []
                     context = worker.restart_graph(
                         lambda restart_worker: self._wait_for_restart_ready(restart_worker, next_generation),
@@ -236,6 +276,9 @@ class MicrophoneCapturePipeline:
                     )
                 except _FatalRestartError as error:
                     worker.fail("microphone restart cleanup failed", error)
+                    return
+                except _RecordingError as error:
+                    worker.fail("microphone recording restart failed", error)
                     return
                 except Exception as error:
                     if worker.wait_cancelled(0):
@@ -261,6 +304,7 @@ class MicrophoneCapturePipeline:
 
     def _commit_restart(self, context: CaptureContext, cause: PipelineError) -> Event:
         completed = self._delivery.restart(context, cause)
+        self._mark_recording_active()
         self._generation = context.generation
         self._health.clear()
         self._restart_budget.mark_running()
@@ -293,3 +337,19 @@ class MicrophoneCapturePipeline:
                 generation=generation,
             )
         )
+
+    def _mark_recording_active(self) -> None:
+        if self._recording_path is None:
+            return
+        active_path = recording_segment_path(self._recording_path, self._building_generation)
+        with self._recording_lock:
+            for recording in self._recordings.values():
+                if recording.path == active_path:
+                    recording.mark_active()
+                    return
+
+    def _finalize_graph(self, graph: _PipelineGraph, deadline: float) -> None:
+        with self._recording_lock:
+            recording = self._recordings.pop(graph, None)
+        if recording is not None:
+            recording.finalize(deadline)
