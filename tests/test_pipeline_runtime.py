@@ -424,6 +424,87 @@ def test_first_failure_survives_graph_cleanup_failure(monkeypatch: pytest.Monkey
     assert raised.value.secondary_errors[0] is cleanup
 
 
+def test_first_failure_survives_graph_finalization_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    primary = RuntimeError("source failed")
+    finalization = RuntimeError("encoder failed")
+    trigger = Event()
+    runtime, _, _, _ = _runtime(monkeypatch)
+    cast(Any, runtime)._finalize_graph = Mock(side_effect=finalization)
+
+    def worker(context: _WorkerContext) -> None:
+        assert trigger.wait(1)
+        context.fail("capture failed", primary)
+
+    runtime.add_worker("failure", worker)
+    runtime.start()
+    trigger.set()
+
+    with pytest.raises(PipelineError) as raised:
+        runtime.wait(timeout=1)
+
+    assert raised.value.__cause__ is primary
+    assert raised.value.secondary_errors == (finalization,)
+
+
+def test_finalizer_runs_before_close_and_timeout_is_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    timeout = PipelineTimeoutError("recording finalization timed out")
+    runtime, graph, _, _ = _runtime(monkeypatch)
+    expected_graph = cast(_PipelineGraph, graph)
+    original_close = graph.close
+
+    def close() -> tuple[BaseException, ...]:
+        calls.append("close")
+        return original_close()
+
+    cast(Any, graph).close = close
+
+    def finalize(owned: _PipelineGraph, deadline: float) -> None:
+        assert owned is expected_graph
+        assert deadline >= time.monotonic()
+        calls.append("finalize")
+        raise timeout
+
+    cast(Any, runtime)._finalize_graph = finalize
+    runtime.start()
+
+    with pytest.raises(PipelineTimeoutError) as raised:
+        runtime.stop()
+
+    assert raised.value is timeout
+    assert runtime.failure is timeout
+    assert runtime.state is PipelineState.STOPPED
+    assert calls[:2] == ["finalize", "close"]
+
+
+def test_blocked_finalizer_is_forced_to_null_within_stop_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    entered = Event()
+    release = Event()
+    runtime, graph, _, _ = _runtime(monkeypatch)
+
+    def finalize(owned: _PipelineGraph, deadline: float) -> None:
+        del owned, deadline
+        entered.set()
+        release.wait()
+
+    cast(Any, runtime)._finalize_graph = finalize
+    runtime.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(PipelineTimeoutError):
+            runtime.stop(timeout=0.02)
+        assert time.monotonic() - started < 0.5
+        assert runtime.state is PipelineState.STOPPED
+        assert graph.released.is_set()
+        assert entered.is_set()
+    finally:
+        release.set()
+    deadline = time.monotonic() + 1
+    while not graph.cleanup_complete and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert graph.cleanup_complete
+
+
 def test_wait_timeout_is_non_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime, _, _, _ = _runtime(monkeypatch)
     with pytest.raises(PipelineStateError):

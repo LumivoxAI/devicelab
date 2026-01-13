@@ -15,6 +15,8 @@ REQUIRED_GSTREAMER_FACTORIES = (
     "audioconvert",
     "audioresample",
     "queue",
+    "tee",
+    "filesink",
     "pipewiresrc",
     "pipewiresink",
     "wavparse",
