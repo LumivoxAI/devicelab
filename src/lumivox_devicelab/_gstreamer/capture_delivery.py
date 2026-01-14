@@ -94,6 +94,7 @@ class _CaptureDelivery:
         self._current_context: CaptureContext | None = None
         self._pending_generation: _GenerationChange | None = None
         self._force_discontinuity = False
+        self._previous_packet: CapturePacket | None = None
         self._finished = False
 
     def activate(self, worker: _WorkerContext, context: CaptureContext) -> None:
@@ -207,6 +208,7 @@ class _CaptureDelivery:
         with self._lock:
             self._current_context = change.context
             self._force_discontinuity = True
+            self._previous_packet = None
         if worker.cancelled:
             change.completed.set()
             return False
@@ -259,6 +261,8 @@ class _CaptureDelivery:
     def _deliver_packets(self, worker: _WorkerContext, packets: list[tuple[CapturePacket, bool]]) -> bool:
         group: list[CapturePacket] = []
         group_discontinuous = False
+        with self._lock:
+            previous_packet = self._previous_packet
         for packet, forced in packets:
             try:
                 self._validate_packet(packet)
@@ -266,6 +270,8 @@ class _CaptureDelivery:
                 worker.fail("invalid capture packet reached delivery", error)
                 return False
             packet_discontinuous = forced or bool(packet.flags & (CapturePacketFlags.DISCONT | CapturePacketFlags.GAP))
+            if not group and previous_packet is not None and not self._is_contiguous(previous_packet, packet):
+                packet_discontinuous = True
             if group and (packet_discontinuous or not self._is_contiguous(group[-1], packet)):
                 if not self._deliver_group(worker, group, group_discontinuous):
                     return False
@@ -274,7 +280,11 @@ class _CaptureDelivery:
             if not group:
                 group_discontinuous = group_discontinuous or packet_discontinuous
             group.append(packet)
-        return not group or self._deliver_group(worker, group, group_discontinuous)
+        delivered = not group or self._deliver_group(worker, group, group_discontinuous)
+        if delivered and group:
+            with self._lock:
+                self._previous_packet = group[-1]
+        return delivered
 
     def _deliver_group(
         self,

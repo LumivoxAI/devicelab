@@ -117,6 +117,7 @@ class _PipelineRuntime:
         self._cancel_event = Event()
         self._playing_event = Event()
         self._readiness_event = Event()
+        self._started_event = Event()
         self._graph_closed_event = Event()
         self._teardown_deadline: float | None = None
         self._restart_in_progress = False
@@ -167,6 +168,8 @@ class _PipelineRuntime:
             if self._state is PipelineState.STOPPED:
                 if self._failure is not None:
                     raise self._failure
+                if self._started_event.is_set():
+                    return
                 raise PipelineStateError("pipeline startup was cancelled")
 
         timeout_error = PipelineTimeoutError("pipeline start timed out")
@@ -278,6 +281,7 @@ class _PipelineRuntime:
             with self._condition:
                 if self._state is PipelineState.STARTING and not self._cancel_event.is_set():
                     self._state = PipelineState.RUNNING
+                    self._started_event.set()
                     self._condition.notify_all()
 
             self._cancel_event.wait()
