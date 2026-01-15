@@ -187,6 +187,25 @@ def test_start_waits_for_playing_and_readiness(monkeypatch: pytest.MonkeyPatch) 
     assert graph.released.is_set()
 
 
+def test_start_succeeds_if_pipeline_completes_immediately_after_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime, graph, _, _ = _runtime(monkeypatch)
+
+    def complete(context: _WorkerContext) -> None:
+        while runtime.state is PipelineState.STARTING:
+            assert not context.wait_cancelled(0.001)
+        context.stop()
+
+    runtime.add_worker("immediate-completion", complete)
+    runtime.start()
+
+    deadline = time.monotonic() + 1
+    while runtime.state is not PipelineState.STOPPED and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert runtime.state is PipelineState.STOPPED
+    assert runtime.failure is None
+    assert graph.released.is_set()
+
+
 def test_start_requires_top_level_pipeline_state_message(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime, graph, _, gst = _runtime(monkeypatch, announce_playing=False)
     starter, errors = _call_in_thread(runtime.start)

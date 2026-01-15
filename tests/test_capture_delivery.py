@@ -206,6 +206,19 @@ def test_delivery_aggregates_with_one_frame_tolerance_and_splits_larger_gap() ->
     assert handler.events == ["start:0", "chunk:0", "chunk:0", "stop:0"]
 
 
+def test_delivery_detects_a_timestamp_gap_between_pull_batches() -> None:
+    source = PacketSource(_packet(0, [1]), _packet(3_000_000, [2]))
+    worker = FakeWorker([])
+    handler = RecordingHandler()
+    delivery, thread = _delivery(handler, source, worker, max_batch_packets=1)
+    delivery.notify_eos()
+    thread.join(1)
+
+    assert not thread.is_alive()
+    assert [chunk.samples.tolist() for chunk in handler.chunks] == [[1], [2]]
+    assert [chunk.discontinuity for chunk in handler.chunks] == [False, True]
+
+
 @pytest.mark.parametrize(
     "kind",
     [
