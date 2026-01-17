@@ -7,6 +7,7 @@ import time
 import tempfile
 from os import PathLike
 from pathlib import Path
+from threading import Lock
 
 from lumivox_core.logger import Logger
 
@@ -74,6 +75,7 @@ class _RecordingBranch:
         self._overwrite = overwrite
         self._active = False
         self._finalized = False
+        self._completion_lock = Lock()
 
     @classmethod
     def build(
@@ -134,6 +136,36 @@ class _RecordingBranch:
         self._publish()
         self._finalized = True
         self._logger.info("recording_finalized", path=str(self.path))
+
+    def complete_source_eos(self, deadline: float) -> None:
+        """Publish after EOS has already entered the branch from its source."""
+        del deadline
+        with self._completion_lock:
+            if self._finalized:
+                return
+            if not self._active:
+                self._discard_unstarted()
+                self._finalized = True
+                return
+            # Top-level pipeline EOS is emitted only after every sink, including
+            # this encoder branch, has completed EOS processing.
+            self._logger.debug("recording_finalization_started", path=str(self.path))
+            self._publish()
+            self._finalized = True
+            self._logger.info("recording_finalized", path=str(self.path))
+
+    def abort(self) -> None:
+        """Remove an unpublished temporary recording after abortive shutdown."""
+        with self._completion_lock:
+            if self._finalized:
+                return
+            self._temporary_path.unlink(missing_ok=True)
+            self._finalized = True
+            self._logger.warning(
+                "recording_aborted",
+                path=str(self.path),
+                temporary_path=str(self._temporary_path),
+            )
 
     def _discard_unstarted(self) -> None:
         self._temporary_path.unlink(missing_ok=True)

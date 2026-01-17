@@ -95,6 +95,7 @@ class _PipelineRuntime:
         on_eos: Callable[[], None] | None = None,
         on_bus_error: _BusErrorHandler | None = None,
         finalize_graph: _GraphFinalizer | None = None,
+        close_before_finalize: bool = False,
     ) -> None:
         self._logger = logger.bind(module="devicelab")
         self._graph_factory = graph_factory
@@ -103,8 +104,10 @@ class _PipelineRuntime:
         self._on_eos = on_eos
         self._on_bus_error = on_bus_error
         self._finalize_graph = finalize_graph
+        self._close_before_finalize = close_before_finalize
 
         self._condition = Condition(Lock())
+        self._graceful_stop_lock = Lock()
         self._state = PipelineState.CREATED
         self._failure: PipelineError | None = None
         self._graph: _PipelineGraph | None = None
@@ -135,6 +138,10 @@ class _PipelineRuntime:
     def failure(self) -> PipelineError | None:
         with self._condition:
             return self._failure
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel_event.is_set()
 
     def add_worker(self, name: str, target: _WorkerTarget) -> None:
         """Register a pipeline worker before startup."""
@@ -221,6 +228,63 @@ class _PipelineRuntime:
         failure = self._authoritative_failure(timeout_error)
         raise failure
 
+    def stop_gracefully(self, completion_request: Callable[[], None], *, timeout: float = 10.0) -> None:
+        """Request source completion and wait for its worker-driven teardown."""
+        validated = validate_timeout(timeout)
+        assert validated is not None
+        deadline = time.monotonic() + validated
+        if not self._graceful_stop_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            timeout_error = PipelineTimeoutError("pipeline stop timed out waiting for graceful completion")
+            self._force_terminal(timeout_error)
+            raise self._authoritative_failure(timeout_error)
+        try:
+            with self._condition:
+                if self._failure is not None:
+                    raise self._failure
+                state = self._state
+                if state is PipelineState.CREATED:
+                    self._state = PipelineState.STOPPED
+                    self._condition.notify_all()
+                    return
+                if state is PipelineState.STOPPED:
+                    return
+                initiate = state is PipelineState.RUNNING
+                if initiate:
+                    self._state = PipelineState.STOPPING
+                    self._condition.notify_all()
+                elif state is PipelineState.STARTING:
+                    initiate = False
+
+            if state is PipelineState.STARTING:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timeout_error = PipelineTimeoutError("pipeline graceful stop timed out")
+                    self._force_terminal(timeout_error)
+                    raise self._authoritative_failure(timeout_error)
+                self.stop(timeout=remaining)
+                return
+            if initiate:
+                try:
+                    completion_request()
+                except Exception as error:
+                    if self.cancelled:
+                        raise PipelineStateError("graceful pipeline stop was interrupted", cause=error) from error
+                    self._report_failure("pipeline graceful completion request failed", error)
+                    raise self._authoritative_failure(PipelineError("pipeline graceful completion request failed"))
+            if self._is_worker_thread():
+                return
+
+            with self._condition:
+                if self._wait_stopped_locked(deadline):
+                    if self._failure is not None:
+                        raise self._failure
+                    return
+            timeout_error = PipelineTimeoutError("pipeline graceful stop timed out")
+            self._force_terminal(timeout_error)
+            raise self._authoritative_failure(timeout_error)
+        finally:
+            self._graceful_stop_lock.release()
+
     def wait(self, *, timeout: float | None = None) -> None:
         validated = validate_timeout(timeout, allow_none=True)
         deadline = None if validated is None else time.monotonic() + validated
@@ -237,6 +301,39 @@ class _PipelineRuntime:
                 self._condition.wait(remaining)
             if self._failure is not None:
                 raise self._failure
+
+    def use_graph(self, operation: Callable[[Any], _T]) -> _T:
+        """Run one guarded operation on the active graph."""
+        return self._get_graph().use(operation)
+
+    def begin_graceful_stop(self) -> None:
+        """Linearize graceful completion without cancelling graph operations."""
+        with self._condition:
+            if self._failure is not None:
+                raise self._failure
+            if self._state is not PipelineState.RUNNING:
+                raise PipelineStateError(f"cannot gracefully stop pipeline in state {self._state.value}")
+            self._state = PipelineState.STOPPING
+            self._condition.notify_all()
+
+    def complete_graceful_stop(self, deadline: float, timeout_error: PipelineTimeoutError) -> None:
+        """Finish a graceful terminal operation by the caller's deadline."""
+        with self._condition:
+            if self._failure is not None:
+                raise self._failure
+            if self._cancel_event.is_set():
+                raise PipelineStateError("graceful pipeline completion was interrupted by stop")
+            self._request_stop_locked(deadline)
+            if self._wait_stopped_locked(deadline):
+                if self._failure is not None:
+                    raise self._failure
+                return
+        self._force_terminal(timeout_error)
+        raise self._authoritative_failure(timeout_error)
+
+    def force_terminal(self, error: PipelineTimeoutError) -> None:
+        """Retain a terminal timeout and force immediate best-effort teardown."""
+        self._force_terminal(error)
 
     def _supervise(self) -> None:
         try:
@@ -550,19 +647,28 @@ class _PipelineRuntime:
         with self._condition:
             graph = self._graph
         if graph is not None:
-            idle = graph.wait_idle(max(0.0, deadline - time.monotonic()))
-            finalization_error = (
-                self._finalize_before_close(graph, deadline)
-                if idle
-                else PipelineTimeoutError("pipeline graph did not become idle before finalization")
-            )
+            if self._close_before_finalize:
+                with self._condition:
+                    if self._graph is graph:
+                        self._graph = None
+                        self._graph_pipeline = None
+                self._close_graph(graph)
+                idle = graph.wait_idle(max(0.0, deadline - time.monotonic()))
+                finalization_error = self._finalize_before_close(graph, deadline)
+            else:
+                idle = graph.wait_idle(max(0.0, deadline - time.monotonic()))
+                finalization_error = self._finalize_before_close(graph, deadline) if idle else None
+            if not idle:
+                idle_error = PipelineTimeoutError("pipeline graph did not become idle before finalization")
+                self._record_cleanup_errors((idle_error,))
             if finalization_error is not None:
                 self._record_cleanup_errors((finalization_error,))
-            with self._condition:
-                if self._graph is graph:
-                    self._graph = None
-                    self._graph_pipeline = None
-            self._close_graph(graph)
+            if not self._close_before_finalize:
+                with self._condition:
+                    if self._graph is graph:
+                        self._graph = None
+                        self._graph_pipeline = None
+                self._close_graph(graph)
         else:
             self._graph_closed_event.set()
         self._join_workers(deadline)

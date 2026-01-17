@@ -9,8 +9,10 @@ Runtime реализует single-use последовательность
 `created -> starting -> running -> stopping -> stopped`. `start()` завершается
 только после сообщения `PLAYING` от принадлежащего graph pipeline и успешного
 readiness hook. `stop()` отменяет работу и ожидает teardown в пределах общего
-monotonic deadline; `wait()` только наблюдает terminal completion и не меняет
-состояние при timeout.
+monotonic deadline. Внешние pipeline используют `stop_gracefully()` для
+перехода в `stopping`, отправки EOS и ожидания worker-driven teardown без ранней
+отмены. `wait()` только наблюдает terminal completion и не меняет состояние при
+timeout.
 
 Control thread выполняет teardown в следующем порядке:
 

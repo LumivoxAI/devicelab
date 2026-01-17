@@ -19,7 +19,7 @@ from lumivox_devicelab.capture import CaptureHandler
 from lumivox_devicelab.formats import AudioFormat, build_raw_audio_spec
 
 from ._gstreamer.graph import _PipelineGraph
-from ._gstreamer.runtime import GStreamerElementError
+from ._gstreamer.runtime import GStreamerElementError, get_gst
 from ._gstreamer.elements.app import AppSink, AppSinkPolicy, CapturePacket, CapturePacketError
 from ._gstreamer.elements.base import BaseElement
 from ._gstreamer.elements.file import FileSrc, FlacDec, WavParse, FlacParse, FileReplayMode
@@ -65,6 +65,7 @@ class FileCapturePipeline:
         self._suffix = suffix
         self._replay_mode = replay_mode
         self._spec = build_raw_audio_spec(audio_format)
+        self._source: FileSrc | None = None
         self._app_sink: AppSink | None = None
         self._eos = Event()
 
@@ -95,8 +96,13 @@ class FileCapturePipeline:
     def start(self, *, timeout: float = 10.0) -> None:
         self._runtime.start(timeout=timeout)
 
-    def stop(self, *, timeout: float = 5.0) -> None:
-        self._runtime.stop(timeout=timeout)
+    def stop(self, *, immediate: bool = False, timeout: float = 10.0) -> None:
+        if not isinstance(immediate, bool):
+            raise TypeError("immediate must be a bool")
+        if immediate:
+            self._runtime.stop(timeout=timeout)
+        else:
+            self._runtime.stop_gracefully(self._send_eos, timeout=timeout)
 
     def wait(self, *, timeout: float | None = None) -> None:
         self._runtime.wait(timeout=timeout)
@@ -137,6 +143,7 @@ class FileCapturePipeline:
         elements.append(app_sink)
         graph.add(*elements)
         graph.link(*elements)
+        self._source = source
         self._app_sink = app_sink
 
     def _ready(self, worker: _WorkerContext) -> None:
@@ -172,6 +179,15 @@ class FileCapturePipeline:
     def _note_eos(self) -> None:
         self._eos.set()
 
+    def _send_eos(self) -> None:
+        gst = get_gst()
+        source = self._source
+        if source is None:
+            raise GStreamerElementError("file capture source is unavailable")
+        accepted = self._runtime.use_graph(lambda pipeline: source.impl.send_event(gst.Event.new_eos()))
+        if not accepted:
+            raise GStreamerElementError("file capture pipeline rejected EOS")
+
     def _complete_eos(self, worker: _WorkerContext) -> None:
         while not self._eos.wait(0.01):
             if worker.cancelled:
@@ -179,5 +195,5 @@ class FileCapturePipeline:
         while self.state is PipelineState.STARTING:
             if worker.wait_cancelled(0.01):
                 return
-        if self.state is PipelineState.RUNNING and not worker.cancelled:
+        if self.state in (PipelineState.RUNNING, PipelineState.STOPPING) and not worker.cancelled:
             self._delivery.notify_eos()

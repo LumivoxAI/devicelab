@@ -64,6 +64,15 @@ class CapturePacket:
     flags: CapturePacketFlags
 
 
+@dataclass(frozen=True, slots=True)
+class PlaybackPushResult:
+    """Accepted prefix and outcome of one AppSrc submission."""
+
+    flow_return: object | None
+    accepted_frames: int
+    error: BaseException | None = None
+
+
 class AppSink(BaseElement):
     """Pull normalized audio buffers from GStreamer as copied NumPy arrays."""
 
@@ -246,29 +255,47 @@ class AppSrc(BaseElement):
         self.impl.set_property("max-buffers", 0)
         self.impl.set_property("max-bytes", max_queue_bytes)
         self._spec = spec
-        self._frames_pushed = 0
+        self._timeline_anchor_ns: int | None = None
+        self._timeline_frames = 0
+        self._next_pts_ns: int | None = None
         self._max_buffer_frames = max(1, spec.rate * _MAX_APP_SRC_BUFFER_TIME_MS // 1_000)
 
-    def push(self, data: np.ndarray) -> Gst.FlowReturn:
-        """Push PCM data and return GStreamer's result for the final buffer."""
+    def push(
+        self,
+        data: np.ndarray,
+        running_time_ns: Callable[[], int] | None = None,
+    ) -> PlaybackPushResult:
+        """Push PCM data and report the prefix accepted by GStreamer."""
         frames = validate_pcm_array(data, self._spec)
         gst = get_gst()
-        flow_return: Gst.FlowReturn = gst.FlowReturn.OK
+        accepted_frames = 0
         for start_frame in range(0, frames, self._max_buffer_frames):
-            chunk = data[start_frame : start_frame + self._max_buffer_frames]
-            raw = chunk.tobytes(order="C")
-            buffer = gst.Buffer.new_allocate(None, len(raw), None)
-            buffer.fill(0, raw)
-            start_ns = self._frames_pushed * gst.SECOND // self._spec.rate
-            end_frame = self._frames_pushed + len(chunk)
-            end_ns = end_frame * gst.SECOND // self._spec.rate
-            buffer.pts = start_ns
-            buffer.duration = end_ns - start_ns
-            flow_return = self.impl.emit("push-buffer", buffer)
+            try:
+                chunk = data[start_frame : start_frame + self._max_buffer_frames]
+                raw = chunk.tobytes(order="C")
+                buffer = gst.Buffer.new_allocate(None, len(raw), None)
+                buffer.fill(0, raw)
+                current_running_time = 0 if running_time_ns is None else running_time_ns()
+                if current_running_time < 0:
+                    raise GStreamerElementError("pipeline running time must not be negative")
+                if self._next_pts_ns is None or current_running_time > self._next_pts_ns:
+                    self._timeline_anchor_ns = current_running_time
+                    self._timeline_frames = 0
+                assert self._timeline_anchor_ns is not None
+                start_ns = self._timeline_anchor_ns + self._timeline_frames * gst.SECOND // self._spec.rate
+                end_frame = self._timeline_frames + len(chunk)
+                end_ns = self._timeline_anchor_ns + end_frame * gst.SECOND // self._spec.rate
+                buffer.pts = start_ns
+                buffer.duration = end_ns - start_ns
+                flow_return = self.impl.emit("push-buffer", buffer)
+            except Exception as error:
+                return PlaybackPushResult(None, accepted_frames, error)
             if flow_return != gst.FlowReturn.OK:
-                return flow_return
-            self._frames_pushed = end_frame
-        return flow_return
+                return PlaybackPushResult(flow_return, accepted_frames)
+            self._timeline_frames = end_frame
+            self._next_pts_ns = end_ns
+            accepted_frames += len(chunk)
+        return PlaybackPushResult(gst.FlowReturn.OK, accepted_frames)
 
     def push_eos(self) -> Gst.FlowReturn:
         """Signal that no further buffers will be pushed to this source."""

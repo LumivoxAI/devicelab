@@ -19,7 +19,7 @@ from lumivox_devicelab.capture import CaptureContext, CaptureHandler
 from lumivox_devicelab.formats import AudioFormat, ChannelSelection, build_raw_audio_spec
 
 from ._gstreamer.graph import _PipelineGraph
-from ._gstreamer.runtime import GStreamerElementError
+from ._gstreamer.runtime import GStreamerElementError, get_gst
 from ._gstreamer.recording import _RecordingError, _RecordingBranch, recording_segment_path, validate_recording_path
 from ._gstreamer.elements.app import AppSink, AppSinkPolicy, CapturePacket, CapturePacketError
 from ._gstreamer.elements.base import BaseElement
@@ -89,6 +89,8 @@ class MicrophoneCapturePipeline:
         self._recovery_event = Event()
         self._recovery_cause: PipelineError | None = None
         self._recovering = False
+        self._graceful_eos = Event()
+        self._abort_recording = Event()
 
         self._delivery = _CaptureDelivery(
             logger=self._logger,
@@ -119,8 +121,14 @@ class MicrophoneCapturePipeline:
     def start(self, *, timeout: float = 10.0) -> None:
         self._runtime.start(timeout=timeout)
 
-    def stop(self, *, timeout: float = 5.0) -> None:
-        self._runtime.stop(timeout=timeout)
+    def stop(self, *, immediate: bool = False, timeout: float = 10.0) -> None:
+        if not isinstance(immediate, bool):
+            raise TypeError("immediate must be a bool")
+        if immediate:
+            self._abort_recording.set()
+            self._runtime.stop(timeout=timeout)
+        else:
+            self._runtime.stop_gracefully(self._send_eos, timeout=timeout)
 
     def wait(self, *, timeout: float | None = None) -> None:
         self._runtime.wait(timeout=timeout)
@@ -217,12 +225,25 @@ class MicrophoneCapturePipeline:
         return True
 
     def _unexpected_eos(self) -> None:
+        if self.state is PipelineState.STOPPING and not self._runtime.cancelled:
+            self._graceful_eos.set()
+            self._delivery.notify_eos()
+            return
         if self.state is not PipelineState.RUNNING:
             raise GStreamerElementError("microphone pipeline reached unexpected EOS during startup")
         self._request_recovery(
             "microphone pipeline reached unexpected EOS",
             GStreamerElementError("microphone pipeline reached unexpected EOS"),
         )
+
+    def _send_eos(self) -> None:
+        gst = get_gst()
+        source = self._pipewire_source
+        if source is None:
+            raise GStreamerElementError("microphone source is unavailable")
+        accepted = self._runtime.use_graph(lambda pipeline: source.impl.send_event(gst.Event.new_eos()))
+        if not accepted:
+            raise GStreamerElementError("microphone pipeline rejected EOS")
 
     def _request_recovery(self, message: str, cause: BaseException) -> None:
         recovery_cause = cause if isinstance(cause, PipelineError) else PipelineError(message, cause=cause)
@@ -352,4 +373,9 @@ class MicrophoneCapturePipeline:
         with self._recording_lock:
             recording = self._recordings.pop(graph, None)
         if recording is not None:
-            recording.finalize(deadline)
+            if self._abort_recording.is_set():
+                recording.abort()
+            elif self._graceful_eos.is_set():
+                recording.complete_source_eos(deadline)
+            else:
+                recording.finalize(deadline)
