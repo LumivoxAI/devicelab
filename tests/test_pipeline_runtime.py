@@ -126,6 +126,8 @@ def _runtime(
     on_eos: Callable[[], None] | None = None,
     release_errors: tuple[BaseException, ...] = (),
     build_graph: Callable[[_PipelineGraph], None] | None = None,
+    close_before_finalize: bool = False,
+    finalize_graph: Callable[[_PipelineGraph, float], None] | None = None,
 ) -> tuple[_PipelineRuntime, FakeGraph, Mock, SimpleNamespace]:
     gst = _gst()
     monkeypatch.setattr(runtime_module, "get_gst", lambda: gst)
@@ -139,8 +141,31 @@ def _runtime(
         build_graph=build_graph,
         readiness=readiness,
         on_eos=on_eos,
+        close_before_finalize=close_before_finalize,
+        finalize_graph=finalize_graph,
     )
     return runtime, graph, logger, gst
+
+
+def test_abortive_runtime_closes_graph_before_finalization(monkeypatch: pytest.MonkeyPatch) -> None:
+    finalized_after_close = Event()
+
+    def finalize(graph: _PipelineGraph, deadline: float) -> None:
+        del deadline
+        fake_graph = cast(FakeGraph, graph)
+        assert fake_graph.released.is_set()
+        finalized_after_close.set()
+
+    runtime, _, _, _ = _runtime(
+        monkeypatch,
+        close_before_finalize=True,
+        finalize_graph=finalize,
+    )
+    runtime.start()
+
+    runtime.stop()
+
+    assert finalized_after_close.is_set()
 
 
 def _call_in_thread(operation: Callable[[], None]) -> tuple[Thread, list[BaseException]]:
@@ -305,6 +330,24 @@ def test_concurrent_external_stops_join_one_teardown(monkeypatch: pytest.MonkeyP
     second.join(1)
     assert first_errors == []
     assert second_errors == []
+    assert graph.released.is_set()
+
+
+def test_graceful_stop_requests_completion_before_teardown(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime, graph, _, _ = _runtime(monkeypatch)
+    completion_requested = Event()
+
+    def complete() -> None:
+        assert runtime.state is PipelineState.STOPPING
+        assert not runtime.cancelled
+        completion_requested.set()
+        runtime.stop()
+
+    runtime.start()
+    runtime.stop_gracefully(complete)
+
+    assert completion_requested.is_set()
+    assert runtime.state is PipelineState.STOPPED
     assert graph.released.is_set()
 
 

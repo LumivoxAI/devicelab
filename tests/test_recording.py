@@ -176,3 +176,62 @@ def test_recording_is_published_atomically_without_replacing_unless_explicit(
             branch.finalize(time.monotonic() + 1)
         assert target.read_bytes() == b"old"
         assert temporary.read_bytes() == b"new"
+
+
+def test_source_eos_publishes_without_sending_a_second_eos(tmp_path: Path) -> None:
+    from lumivox_devicelab._gstreamer import recording as recording_module
+
+    target = tmp_path / "played.wav"
+    temporary = tmp_path / ".played.wav.owned.tmp"
+    temporary.write_bytes(b"complete")
+    queue = Mock()
+    logger = Mock()
+    logger.bind.return_value = logger
+    branch = recording_module._RecordingBranch(
+        logger=logger,
+        path=target,
+        temporary_path=temporary,
+        queue=queue,
+        encoder=Mock(),
+        sink=Mock(),
+        bus=Mock(),
+        overwrite=False,
+    )
+    branch.mark_active()
+
+    branch.complete_source_eos(time.monotonic() + 1)
+
+    assert target.read_bytes() == b"complete"
+    assert not temporary.exists()
+    queue.impl.send_event.assert_not_called()
+
+
+def test_abort_removes_owned_temporary_file_and_logs_warning(tmp_path: Path) -> None:
+    from lumivox_devicelab._gstreamer import recording as recording_module
+
+    target = tmp_path / "played.wav"
+    temporary = tmp_path / ".played.wav.owned.tmp"
+    temporary.write_bytes(b"partial")
+    logger = Mock()
+    logger.bind.return_value = logger
+    branch = recording_module._RecordingBranch(
+        logger=logger,
+        path=target,
+        temporary_path=temporary,
+        queue=Mock(),
+        encoder=Mock(),
+        sink=Mock(),
+        bus=Mock(),
+        overwrite=False,
+    )
+    branch.mark_active()
+
+    branch.abort()
+
+    assert not target.exists()
+    assert not temporary.exists()
+    logger.warning.assert_called_once_with(
+        "recording_aborted",
+        path=str(target),
+        temporary_path=str(temporary),
+    )

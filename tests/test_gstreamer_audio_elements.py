@@ -87,10 +87,60 @@ def test_appsrc_splits_large_arrays_into_timestamped_buffers(
     if spec.channels > 1:
         data = data.reshape(frames, spec.channels)
 
-    assert element.push(data) == gst.FlowReturn.OK
+    result = element.push(data)
+
+    assert result.flow_return == gst.FlowReturn.OK
+    assert result.accepted_frames == frames
+    assert result.error is None
     assert [buffer.get_size() for buffer in buffers] == expected_sizes
     assert [buffer.pts for buffer in buffers] == [0, 20_000_000, 40_000_000]
     assert [buffer.duration for buffer in buffers] == expected_durations
+
+
+def test_appsrc_rebases_after_idle_without_accumulating_rounding_error() -> None:
+    spec = RawAudioSpec(rate=44_100, channels=1)
+    element = AppSrc(spec)
+    gst = get_gst()
+    buffers: list[Any] = []
+    running_times = iter((50_000_000, 50_000_001, 50_000_002, 100_000_000))
+
+    class RecordingAppSrc:
+        def emit(self, signal_name: str, buffer: Any) -> Any:
+            assert signal_name == "push-buffer"
+            buffers.append(buffer)
+            return gst.FlowReturn.OK
+
+    element._impl = RecordingAppSrc()
+    first = np.zeros(2_000, dtype=np.int16)
+    second = np.zeros(1, dtype=np.int16)
+
+    assert element.push(first, lambda: next(running_times)).accepted_frames == 2_000
+    assert element.push(second, lambda: next(running_times)).accepted_frames == 1
+
+    assert [buffer.pts for buffer in buffers[:3]] == [50_000_000, 70_000_000, 90_000_000]
+    assert buffers[2].pts + buffers[2].duration == 95_351_473
+    assert buffers[3].pts == 100_000_000
+
+
+def test_appsrc_reports_prefix_and_does_not_advance_timeline_after_failed_flow() -> None:
+    spec = RawAudioSpec(rate=16_000, channels=1)
+    element = AppSrc(spec)
+    gst = get_gst()
+    buffers: list[Any] = []
+
+    class FailingAppSrc:
+        def emit(self, signal_name: str, buffer: Any) -> Any:
+            assert signal_name == "push-buffer"
+            buffers.append(buffer)
+            return gst.FlowReturn.OK if len(buffers) != 2 else gst.FlowReturn.FLUSHING
+
+    element._impl = FailingAppSrc()
+    result = element.push(np.zeros(800, dtype=np.int16))
+
+    assert result.flow_return == gst.FlowReturn.FLUSHING
+    assert result.accepted_frames == 320
+    assert buffers[0].pts == 0
+    assert buffers[1].pts == 20_000_000
 
 
 def test_appsrc_push_eos_returns_gstreamer_flow_result() -> None:

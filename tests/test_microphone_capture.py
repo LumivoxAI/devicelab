@@ -54,6 +54,27 @@ def _logger() -> Mock:
     return logger
 
 
+def test_stop_is_graceful_by_default_and_immediate_is_explicit() -> None:
+    pipeline = MicrophoneCapturePipeline(
+        logger=_logger(),
+        handler=RecordingHandler(),
+        audio_format=AudioFormat(16_000, 1),
+        device_id="stable-microphone",
+    )
+    runtime = Mock()
+    pipeline._runtime = cast(Any, runtime)
+
+    pipeline.stop()
+    runtime.stop_gracefully.assert_called_once_with(pipeline._send_eos, timeout=10.0)
+    runtime.stop.assert_not_called()
+
+    pipeline.stop(immediate=True, timeout=2.0)
+    runtime.stop.assert_called_once_with(timeout=2.0)
+
+    with pytest.raises(TypeError, match="immediate must be a bool"):
+        pipeline.stop(immediate=cast(Any, 1))
+
+
 _T = TypeVar("_T")
 
 
