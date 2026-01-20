@@ -68,6 +68,8 @@ class RawAudioSpec:
 
 def validate_pcm_array(data: np.ndarray, spec: RawAudioSpec) -> int:
     """Validate a public PCM buffer and return its number of frames."""
+    if not isinstance(data, np.ndarray):
+        raise TypeError("data must be a numpy.ndarray")
     if data.dtype != S16LE_DTYPE:
         raise ValueError("data dtype must be little-endian numpy.int16 (PCM S16LE)")
     if spec.channels == 1:

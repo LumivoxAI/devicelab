@@ -1,8 +1,4 @@
-"""PipeWire microphone capture pipeline.
-
-This module remains outside the package exports until the complete v1 pipeline
-API is released.
-"""
+"""PipeWire microphone capture pipeline."""
 
 from __future__ import annotations
 

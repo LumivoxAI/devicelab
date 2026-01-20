@@ -1,8 +1,4 @@
-"""PipeWire speaker playback pipeline.
-
-This module remains outside the package exports until the complete v1 pipeline
-API is released.
-"""
+"""PipeWire speaker playback pipeline."""
 
 from __future__ import annotations
 
@@ -23,6 +19,7 @@ from lumivox_devicelab.errors import (
 )
 from lumivox_devicelab.formats import AudioFormat, build_raw_audio_spec
 
+from ._gstreamer.audio import validate_pcm_array
 from ._gstreamer.graph import _PipelineGraph
 from ._gstreamer.runtime import GStreamerElementError, get_gst
 from ._gstreamer.recording import _RecordingBranch, validate_recording_path
@@ -113,6 +110,7 @@ class SpeakerPlaybackPipeline:
 
     def submit(self, data: np.ndarray) -> None:
         """Append PCM, blocking for bounded AppSrc capacity when necessary."""
+        validate_pcm_array(data, self._spec)
         with self._operation_lock:
             failure = self.failure
             if failure is not None:
@@ -148,6 +146,9 @@ class SpeakerPlaybackPipeline:
                 failure = self.failure
                 if failure is not None:
                     raise failure
+                return
+            if state in (PipelineState.CREATED, PipelineState.STARTING):
+                self._runtime.stop(timeout=max(0.0, deadline - time.monotonic()))
                 return
             self._runtime.begin_graceful_stop()
             app_src = self._app_src

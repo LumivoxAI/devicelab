@@ -23,6 +23,9 @@ from lumivox_devicelab.devices import (
     MicrophoneDeviceDiscovery,
 )
 from lumivox_devicelab.formats import AudioFormat, ChannelSelection
+from lumivox_devicelab.speaker import SpeakerPlaybackPipeline
+from lumivox_devicelab.microphone import MicrophoneCapturePipeline
+from lumivox_devicelab.file_capture import FileReplayMode, FileCapturePipeline
 
 __all__ = [
     "AudioFormat",
@@ -47,4 +50,8 @@ __all__ = [
     "DeviceSnapshot",
     "MicrophoneDeviceDiscovery",
     "SpeakerDeviceDiscovery",
+    "FileReplayMode",
+    "MicrophoneCapturePipeline",
+    "FileCapturePipeline",
+    "SpeakerPlaybackPipeline",
 ]

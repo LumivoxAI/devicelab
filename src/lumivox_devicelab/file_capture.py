@@ -1,13 +1,10 @@
-"""WAV and FLAC capture pipeline.
-
-This module remains outside the package exports until the complete v1 pipeline
-API is released.
-"""
+"""WAV and FLAC capture pipeline."""
 
 from __future__ import annotations
 
 import os
 from os import PathLike
+from enum import StrEnum
 from pathlib import Path
 from threading import Event
 
@@ -22,13 +19,20 @@ from ._gstreamer.graph import _PipelineGraph
 from ._gstreamer.runtime import GStreamerElementError, get_gst
 from ._gstreamer.elements.app import AppSink, AppSinkPolicy, CapturePacket, CapturePacketError
 from ._gstreamer.elements.base import BaseElement
-from ._gstreamer.elements.file import FileSrc, FlacDec, WavParse, FlacParse, FileReplayMode
+from ._gstreamer.elements.file import FileSrc, FlacDec, WavParse, FlacParse
 from ._gstreamer.elements.flow import ClockSync, AudioQueue, QueueOverflowPolicy
 from ._gstreamer.elements.audio import CapsFilter, AudioConvert, AudioResample
 from ._gstreamer.capture_delivery import _CaptureDelivery, calibrate_capture_context
 from ._gstreamer.pipeline_runtime import _WorkerContext, _PipelineRuntime
 
 _CAPTURE_QUEUE_TIME_MS = 200
+
+
+class FileReplayMode(StrEnum):
+    """Timing policy for file capture."""
+
+    REALTIME = "realtime"
+    AS_FAST_AS_POSSIBLE = "as_fast_as_possible"
 
 
 class FileCapturePipeline:

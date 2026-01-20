@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from os import PathLike
-from enum import StrEnum
 
 from .base import BaseElement
 
@@ -14,13 +13,6 @@ def _validate_location(location: str | PathLike[str]) -> str:
     if not value:
         raise ValueError("location must not be empty")
     return value
-
-
-class FileReplayMode(StrEnum):
-    """Timing policy applied by a future file-input pipeline builder."""
-
-    REALTIME = "realtime"
-    AS_FAST_AS_POSSIBLE = "as_fast_as_possible"
 
 
 class FileSrc(BaseElement):
