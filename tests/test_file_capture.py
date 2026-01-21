@@ -10,12 +10,11 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-import lumivox_devicelab
 from lumivox_devicelab.state import PipelineState
 from lumivox_devicelab.errors import PipelineError
 from lumivox_devicelab.capture import CapturedChunk, CaptureContext, CaptureHandler
 from lumivox_devicelab.formats import AudioFormat
-from lumivox_devicelab.file_capture import FileCapturePipeline
+from lumivox_devicelab.file_capture import FileReplayMode, FileCapturePipeline
 from lumivox_devicelab._gstreamer.graph import _PipelineGraph
 from lumivox_devicelab._gstreamer.runtime import get_gst
 from lumivox_devicelab._gstreamer.elements.app import (
@@ -23,7 +22,6 @@ from lumivox_devicelab._gstreamer.elements.app import (
     CapturePacketError,
     CapturePacketErrorKind,
 )
-from lumivox_devicelab._gstreamer.elements.file import FileReplayMode
 from lumivox_devicelab._gstreamer.elements.flow import QueueOverflowPolicy
 
 
@@ -148,14 +146,12 @@ def _frame_running_times(handler: RecordingHandler, sample_rate: int) -> np.ndar
     )
 
 
-def test_constructor_is_pure_and_pipeline_is_not_exported(tmp_path: Path) -> None:
+def test_constructor_is_pure(tmp_path: Path) -> None:
     missing = tmp_path / "missing.WAV"
     pipeline = _pipeline(missing)
 
     assert pipeline.state is PipelineState.CREATED
     assert pipeline.failure is None
-    assert "FileCapturePipeline" not in lumivox_devicelab.__all__
-    assert not hasattr(lumivox_devicelab, "FileCapturePipeline")
 
 
 @pytest.mark.parametrize("suffix", [".wav", ".WAV", ".flac", ".FLAC"])

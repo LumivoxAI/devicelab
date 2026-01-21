@@ -10,7 +10,6 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-import lumivox_devicelab
 from lumivox_devicelab.state import PipelineState
 from lumivox_devicelab.errors import PipelineError, DeviceNotFoundError
 from lumivox_devicelab.capture import CapturedChunk, CaptureContext, CaptureHandler
@@ -149,7 +148,7 @@ class FakeRecoveryDelivery:
         return completed
 
 
-def test_constructor_is_pure_and_pipeline_is_not_exported(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_constructor_is_pure(monkeypatch: pytest.MonkeyPatch) -> None:
     resolver = Mock(side_effect=AssertionError("constructor accessed devices"))
     monkeypatch.setattr("lumivox_devicelab.microphone.resolve_pipewire_target", resolver)
 
@@ -163,8 +162,6 @@ def test_constructor_is_pure_and_pipeline_is_not_exported(monkeypatch: pytest.Mo
     assert pipeline.state is PipelineState.CREATED
     assert pipeline.failure is None
     assert resolver.call_count == 0
-    assert "MicrophoneCapturePipeline" not in lumivox_devicelab.__all__
-    assert not hasattr(lumivox_devicelab, "MicrophoneCapturePipeline")
 
 
 def test_recording_configuration_is_validated_before_start(tmp_path: Path) -> None:

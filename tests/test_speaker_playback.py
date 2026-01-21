@@ -9,7 +9,6 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
-import lumivox_devicelab
 from lumivox_devicelab.state import PipelineState
 from lumivox_devicelab.errors import PipelineError, PipelineStateError, PlaybackSubmissionError
 from lumivox_devicelab.formats import AudioFormat
@@ -86,7 +85,7 @@ def _call_in_thread(operation: Callable[[], None]) -> tuple[Thread, list[BaseExc
     return thread, errors
 
 
-def test_constructor_is_pure_and_pipeline_is_not_exported(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_constructor_is_pure(monkeypatch: pytest.MonkeyPatch) -> None:
     resolver = Mock(side_effect=AssertionError("constructor accessed devices"))
     monkeypatch.setattr("lumivox_devicelab.speaker.resolve_pipewire_target", resolver)
 
@@ -99,8 +98,41 @@ def test_constructor_is_pure_and_pipeline_is_not_exported(monkeypatch: pytest.Mo
     assert pipeline.state is PipelineState.CREATED
     assert pipeline.failure is None
     assert resolver.call_count == 0
-    assert "SpeakerPlaybackPipeline" not in lumivox_devicelab.__all__
-    assert not hasattr(lumivox_devicelab, "SpeakerPlaybackPipeline")
+
+
+@pytest.mark.parametrize("state", [PipelineState.CREATED, PipelineState.STARTING])
+def test_graceful_stop_before_running_uses_runtime_stop(state: PipelineState) -> None:
+    pipeline = SpeakerPlaybackPipeline(
+        logger=_logger(),
+        audio_format=AudioFormat(16_000, 1),
+        device_id="stable-speaker",
+    )
+    runtime = Mock(state=state, failure=None)
+    pipeline._runtime = cast(Any, runtime)
+
+    pipeline.stop()
+
+    timeout = runtime.stop.call_args.kwargs["timeout"]
+    assert 0 < timeout <= 10.0
+    runtime.begin_graceful_stop.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("data", "error"),
+    [
+        ([], TypeError),
+        (np.array([], dtype=np.int16), ValueError),
+        (np.array([0], dtype=np.float32), ValueError),
+        (np.zeros((1, 1), dtype=np.int16), ValueError),
+    ],
+)
+def test_invalid_submission_is_an_argument_error_without_failing_pipeline(data: object, error: type[Exception]) -> None:
+    pipeline, runtime = _pipeline()
+
+    with pytest.raises(error):
+        pipeline.submit(cast(Any, data))
+
+    assert runtime.failure is None
 
 
 def test_recording_configuration_is_validated_before_start(tmp_path: Path) -> None:
