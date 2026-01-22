@@ -6,10 +6,13 @@ import argparse
 
 from lumivox_core.logger import LoggingConfig, get_logger, configure_logging
 
-from lumivox_devicelab.capture import CapturedChunk, CaptureHandler
-from lumivox_devicelab.devices import MicrophoneDeviceDiscovery
-from lumivox_devicelab.formats import AudioFormat
-from lumivox_devicelab.microphone import MicrophoneCapturePipeline
+from lumivox_devicelab import (
+    AudioFormat,
+    CapturedChunk,
+    CaptureHandler,
+    MicrophoneCapturePipeline,
+    MicrophoneDeviceDiscovery,
+)
 
 
 class PrintHandler(CaptureHandler):
