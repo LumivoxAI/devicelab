@@ -55,7 +55,7 @@ test_all:
 
 # Build artifacts without local uv source overrides.
 build:
-    uv build --no-sources
+    uv build --no-sources --clear
 
 # Run the fast, required checks before creating a commit.
 precommit: fmt_check lint typecheck test lock_check

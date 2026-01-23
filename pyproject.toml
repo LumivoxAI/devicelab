@@ -47,7 +47,6 @@ markers = [
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-extend-exclude = ["src/tmp"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -59,8 +58,7 @@ select = ["E", "F", "I"]
 length-sort = true
 
 [tool.mypy]
-files = ["src/lumivox_devicelab", "tests"]
-exclude = ["^src/tmp/"]
+files = ["src/lumivox_devicelab", "tests", "examples"]
 python_version = "3.11"
 strict = true
 warn_unreachable = true
