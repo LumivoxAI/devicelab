@@ -58,6 +58,8 @@ class PipeWireSink(BaseElement):
 
         super().__init__("pipewiresink", name)
         self.impl.set_property("sync", True)
+        self.impl.set_property("async", False)
+        self.impl.set_property("processing-deadline", 0)
         if target_object is not None:
             self.impl.set_property("target-object", target_object)
         if client_name is not None:

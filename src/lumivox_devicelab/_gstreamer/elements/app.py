@@ -14,7 +14,7 @@ from ..audio import S16LE_DTYPE, RawAudioSpec, validate_pcm_array
 from ..runtime import GStreamerElementError, get_gst
 
 if TYPE_CHECKING:
-    from gi.repository import Gst  # type: ignore[import-not-found]
+    from gi.repository import Gst  # type: ignore
 
 _MAX_APP_SRC_BUFFER_TIME_MS = 20
 _NANOSECONDS_PER_SECOND = 1_000_000_000

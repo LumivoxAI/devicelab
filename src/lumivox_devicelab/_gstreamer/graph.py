@@ -82,7 +82,7 @@ class _PipelineGraph:
                     added = self._pipeline.add(element.impl)
                 except Exception as error:
                     raise GStreamerElementError(f"Failed to add {element} to GStreamer pipeline") from error
-                if not added:
+                if added is False:
                     raise GStreamerElementError(f"Failed to add {element} to GStreamer pipeline")
                 self._elements.append(element)
 

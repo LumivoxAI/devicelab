@@ -9,7 +9,7 @@ import pytest
 
 @pytest.mark.parametrize(
     "name",
-    ["microphone_capture.py", "file_capture.py", "speaker_playback.py", "recording.py"],
+    ["microphone_capture.py", "file_capture.py", "speaker_playback.py", "recording.py", "record_playback_gui.py"],
 )
 def test_example_help_does_not_access_gstreamer_or_hardware(name: str) -> None:
     example = Path(__file__).parents[1] / "examples" / name

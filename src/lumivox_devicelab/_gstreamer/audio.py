@@ -8,7 +8,7 @@ from collections.abc import Mapping
 import numpy as np
 
 S16LE_DTYPE = np.dtype("<i2")
-S16LE_BYTES_PER_SAMPLE = S16LE_DTYPE.itemsize
+S16LE_BYTES_PER_SAMPLE = int(S16LE_DTYPE.itemsize)
 
 
 @dataclass(frozen=True, slots=True)

@@ -32,10 +32,12 @@ def test_audio_convert_accepts_valid_channel_mapping() -> None:
     AudioConvert(RawAudioSpec.mapped(rate=16_000, source_channels=4, channel_map={0: 1}))
 
 
-def test_pipewire_sink_synchronizes_playback_with_pipeline_clock() -> None:
+def test_pipewire_sink_starts_without_preroll_and_synchronizes_playback() -> None:
     element = PipeWireSink()
 
     assert element.impl.get_property("sync") is True
+    assert element.impl.get_property("async") is False
+    assert element.impl.get_property("processing-deadline") == 0
 
 
 @pytest.mark.parametrize(
