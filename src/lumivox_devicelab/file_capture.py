@@ -12,6 +12,7 @@ from lumivox_core.logger import Logger
 
 from lumivox_devicelab.state import PipelineState
 from lumivox_devicelab.errors import PipelineError
+from lumivox_devicelab._volume import _VolumeController
 from lumivox_devicelab.capture import CaptureHandler
 from lumivox_devicelab.formats import AudioFormat, build_raw_audio_spec
 
@@ -21,7 +22,7 @@ from ._gstreamer.elements.app import AppSink, AppSinkPolicy, CapturePacket, Capt
 from ._gstreamer.elements.base import BaseElement
 from ._gstreamer.elements.file import FileSrc, FlacDec, WavParse, FlacParse
 from ._gstreamer.elements.flow import ClockSync, AudioQueue, QueueOverflowPolicy
-from ._gstreamer.elements.audio import CapsFilter, AudioConvert, AudioResample
+from ._gstreamer.elements.audio import Volume, CapsFilter, AudioConvert, AudioResample
 from ._gstreamer.capture_delivery import _CaptureDelivery, calibrate_capture_context
 from ._gstreamer.pipeline_runtime import _WorkerContext, _PipelineRuntime
 
@@ -35,7 +36,7 @@ class FileReplayMode(StrEnum):
     AS_FAST_AS_POSSIBLE = "as_fast_as_possible"
 
 
-class FileCapturePipeline:
+class FileCapturePipeline(_VolumeController):
     """Deliver normalized PCM from one WAV or FLAC file."""
 
     def __init__(
@@ -46,7 +47,9 @@ class FileCapturePipeline:
         audio_format: AudioFormat,
         path: str | PathLike[str],
         replay_mode: FileReplayMode,
+        volume: float = 1.0,
     ) -> None:
+        super().__init__(volume)
         if not isinstance(handler, CaptureHandler):
             raise TypeError("handler must be a CaptureHandler")
         if not isinstance(audio_format, AudioFormat):
@@ -97,6 +100,10 @@ class FileCapturePipeline:
     def failure(self) -> PipelineError | None:
         return self._runtime.failure
 
+    def set_volume(self, volume: float) -> None:
+        """Set linear gain from 0.0 (silence) through 10.0."""
+        self._set_volume(volume, self._runtime)
+
     def start(self, *, timeout: float = 10.0) -> None:
         self._runtime.start(timeout=timeout)
 
@@ -128,6 +135,8 @@ class FileCapturePipeline:
                 CapsFilter(self._spec, name="normalized-caps"),
             )
         )
+        volume = Volume(self.volume, name="volume")
+        elements.append(volume)
         if self._replay_mode is FileReplayMode.REALTIME:
             elements.append(ClockSync(name="clock-sync"))
             queue_policy = QueueOverflowPolicy.DROP_OLD
@@ -149,6 +158,7 @@ class FileCapturePipeline:
         graph.link(*elements)
         self._source = source
         self._app_sink = app_sink
+        self._set_volume_element(volume)
 
     def _ready(self, worker: _WorkerContext) -> None:
         while not worker.cancelled:

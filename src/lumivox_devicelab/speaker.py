@@ -17,6 +17,7 @@ from lumivox_devicelab.errors import (
     PipelineTimeoutError,
     PlaybackSubmissionError,
 )
+from lumivox_devicelab._volume import _VolumeController
 from lumivox_devicelab.formats import AudioFormat, build_raw_audio_spec
 
 from ._gstreamer.audio import validate_pcm_array
@@ -26,7 +27,7 @@ from ._gstreamer.recording import _RecordingBranch, validate_recording_path
 from ._gstreamer.elements.app import AppSrc, PlaybackPushResult
 from ._gstreamer.elements.base import BaseElement
 from ._gstreamer.elements.flow import Tee, AudioQueue, QueueOverflowPolicy
-from ._gstreamer.elements.audio import CapsFilter, AudioConvert, AudioResample
+from ._gstreamer.elements.audio import Volume, CapsFilter, AudioConvert, AudioResample
 from ._gstreamer.device_discovery import DeviceDirection, resolve_pipewire_target
 from ._gstreamer.pipeline_runtime import _WorkerContext, _PipelineRuntime
 from ._gstreamer.elements.pipewire import PipeWireSink
@@ -34,7 +35,7 @@ from ._gstreamer.elements.pipewire import PipeWireSink
 _PLAYBACK_BRANCH_QUEUE_TIME_MS = 250
 
 
-class SpeakerPlaybackPipeline:
+class SpeakerPlaybackPipeline(_VolumeController):
     """Submit normalized PCM to one explicitly selected PipeWire speaker.
 
     A caller must leave each input array unchanged until ``submit`` returns.
@@ -48,7 +49,9 @@ class SpeakerPlaybackPipeline:
         device_id: str,
         record_to: str | PathLike[str] | None = None,
         overwrite: bool = False,
+        volume: float = 1.0,
     ) -> None:
+        super().__init__(volume)
         if not isinstance(audio_format, AudioFormat):
             raise TypeError("audio_format must be an AudioFormat")
         if not isinstance(device_id, str):
@@ -93,6 +96,10 @@ class SpeakerPlaybackPipeline:
     @property
     def failure(self) -> PipelineError | None:
         return self._runtime.failure
+
+    def set_volume(self, volume: float) -> None:
+        """Set linear gain from 0.0 (silence) through 10.0."""
+        self._set_volume(volume, self._runtime)
 
     def start(self, *, timeout: float = 10.0) -> None:
         self._runtime.start(timeout=timeout)
@@ -191,11 +198,13 @@ class SpeakerPlaybackPipeline:
         if self._target_object is None:
             raise GStreamerElementError("speaker target has not been resolved")
         app_src = AppSrc(self._spec, name="playback-source")
+        volume = Volume(self.volume, name="volume")
         elements: list[BaseElement] = [
             app_src,
             AudioConvert(self._spec, name="convert"),
             AudioResample(name="resample"),
             CapsFilter(self._spec, name="normalized-caps"),
+            volume,
         ]
         sink = PipeWireSink(
             target_object=self._target_object,
@@ -227,6 +236,7 @@ class SpeakerPlaybackPipeline:
             with self._recording_lock:
                 self._recordings[graph] = recording
         self._app_src = app_src
+        self._set_volume_element(volume)
 
     def _ready(self, worker: _WorkerContext) -> None:
         del worker

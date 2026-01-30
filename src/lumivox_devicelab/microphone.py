@@ -11,6 +11,7 @@ from lumivox_core.logger import Logger
 
 from lumivox_devicelab.state import PipelineState
 from lumivox_devicelab.errors import PipelineError
+from lumivox_devicelab._volume import _VolumeController
 from lumivox_devicelab.capture import CaptureContext, CaptureHandler
 from lumivox_devicelab.formats import AudioFormat, ChannelSelection, build_raw_audio_spec
 
@@ -20,7 +21,7 @@ from ._gstreamer.recording import _RecordingError, _RecordingBranch, recording_s
 from ._gstreamer.elements.app import AppSink, AppSinkPolicy, CapturePacket, CapturePacketError
 from ._gstreamer.elements.base import BaseElement
 from ._gstreamer.elements.flow import Tee, AudioQueue, QueueOverflowPolicy
-from ._gstreamer.elements.audio import CapsFilter, AudioConvert, AudioResample, SourceChannelCapsFilter
+from ._gstreamer.elements.audio import Volume, CapsFilter, AudioConvert, AudioResample, SourceChannelCapsFilter
 from ._gstreamer.capture_delivery import _CaptureDelivery, calibrate_capture_context
 from ._gstreamer.capture_recovery import _CaptureHealth, _RestartBudget
 from ._gstreamer.device_discovery import DeviceDirection, resolve_pipewire_target
@@ -31,7 +32,7 @@ _CAPTURE_QUEUE_TIME_MS = 200
 _RESTART_READINESS_TIMEOUT = 10.0
 
 
-class MicrophoneCapturePipeline:
+class MicrophoneCapturePipeline(_VolumeController):
     """Capture normalized PCM from one explicitly selected PipeWire microphone."""
 
     def __init__(
@@ -44,7 +45,9 @@ class MicrophoneCapturePipeline:
         channel_selection: ChannelSelection | None = None,
         record_to: str | PathLike[str] | None = None,
         overwrite: bool = False,
+        volume: float = 1.0,
     ) -> None:
+        super().__init__(volume)
         if not isinstance(handler, CaptureHandler):
             raise TypeError("handler must be a CaptureHandler")
         if not isinstance(audio_format, AudioFormat):
@@ -114,6 +117,10 @@ class MicrophoneCapturePipeline:
     def failure(self) -> PipelineError | None:
         return self._runtime.failure
 
+    def set_volume(self, volume: float) -> None:
+        """Set linear gain from 0.0 (silence) through 10.0."""
+        self._set_volume(volume, self._runtime)
+
     def start(self, *, timeout: float = 10.0) -> None:
         self._runtime.start(timeout=timeout)
 
@@ -141,6 +148,7 @@ class MicrophoneCapturePipeline:
         convert = AudioConvert(self._spec, name="convert")
         resample = AudioResample(name="resample")
         normalized_caps = CapsFilter(self._spec, name="normalized-caps")
+        volume = Volume(self.volume, name="volume")
         capture_queue = AudioQueue(
             max_time_ms=_CAPTURE_QUEUE_TIME_MS,
             overflow_policy=QueueOverflowPolicy.DROP_OLD,
@@ -154,7 +162,7 @@ class MicrophoneCapturePipeline:
         if self._channel_selection is not None:
             source_caps = SourceChannelCapsFilter(self._channel_selection.source_channels, name="source-channels")
             elements.append(source_caps)
-        elements.extend((convert, resample, normalized_caps))
+        elements.extend((convert, resample, normalized_caps, volume))
         recording_path = self._recording_path
         if recording_path is None:
             elements.extend((capture_queue, app_sink))
@@ -179,6 +187,7 @@ class MicrophoneCapturePipeline:
         self._source_caps = source_caps
         self._pipewire_source = source
         self._app_sink = app_sink
+        self._set_volume_element(volume)
 
     def _ready(self, worker: _WorkerContext) -> None:
         while not worker.cancelled:

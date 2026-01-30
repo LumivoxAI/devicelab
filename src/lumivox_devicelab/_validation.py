@@ -39,3 +39,13 @@ def validate_timeout(timeout: object, *, allow_none: bool = False) -> float | No
     if not math.isfinite(result) or result <= 0:
         raise ValueError("timeout must be a positive finite number")
     return result
+
+
+def validate_volume(value: object) -> float:
+    """Return a finite linear gain factor supported by GStreamer's volume element."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError("volume must be a finite number between 0.0 and 10.0")
+    result = float(value)
+    if not math.isfinite(result) or not 0.0 <= result <= 10.0:
+        raise ValueError("volume must be a finite number between 0.0 and 10.0")
+    return result

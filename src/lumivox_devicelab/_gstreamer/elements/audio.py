@@ -57,6 +57,17 @@ class AudioResample(BaseElement):
         self.impl.set_property("resample-method", "kaiser")
 
 
+class Volume(BaseElement):
+    """Apply a linear gain factor to normalized PCM."""
+
+    def __init__(self, volume: float, name: str | None = None) -> None:
+        super().__init__("volume", name)
+        self.impl.set_property("volume", volume)
+
+    def set_volume(self, volume: float) -> None:
+        self.impl.set_property("volume", volume)
+
+
 class CapsFilter(BaseElement):
     def __init__(self, spec: RawAudioSpec, name: str | None = None) -> None:
         super().__init__("capsfilter", name)
