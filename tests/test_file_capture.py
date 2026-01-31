@@ -188,6 +188,7 @@ def test_replay_mode_requires_the_enum(tmp_path: Path) -> None:
                 "AudioConvert",
                 "AudioResample",
                 "CapsFilter",
+                "Volume",
                 "ClockSync",
                 "AudioQueue",
                 "AppSink",
@@ -198,7 +199,17 @@ def test_replay_mode_requires_the_enum(tmp_path: Path) -> None:
         (
             ".flac",
             FileReplayMode.AS_FAST_AS_POSSIBLE,
-            ["FileSrc", "FlacParse", "FlacDec", "AudioConvert", "AudioResample", "CapsFilter", "AudioQueue", "AppSink"],
+            [
+                "FileSrc",
+                "FlacParse",
+                "FlacDec",
+                "AudioConvert",
+                "AudioResample",
+                "CapsFilter",
+                "Volume",
+                "AudioQueue",
+                "AppSink",
+            ],
             QueueOverflowPolicy.BLOCK,
             AppSinkPolicy.BATCH_BLOCK,
         ),
@@ -223,6 +234,9 @@ def test_graph_uses_format_and_replay_specific_bounded_chain(
         def observe_caps(self, callback: object) -> None:
             del callback
 
+        def set_volume(self, volume: float) -> None:
+            del volume
+
     def factory(kind: str):  # type: ignore[no-untyped-def]
         return lambda *args, **kwargs: FakeElement(kind, kwargs)
 
@@ -234,6 +248,7 @@ def test_graph_uses_format_and_replay_specific_bounded_chain(
         "AudioConvert",
         "AudioResample",
         "CapsFilter",
+        "Volume",
         "ClockSync",
         "AudioQueue",
         "AppSink",
@@ -319,6 +334,28 @@ def test_fast_replay_delivers_every_sample_before_normal_stop(tmp_path: Path, su
     assert handler.stop_cause is None
     assert pipeline.state is PipelineState.STOPPED
     assert pipeline.failure is None
+
+
+@pytest.mark.gstreamer(
+    factories=("filesrc", "wavparse", "audioconvert", "audioresample", "capsfilter", "volume", "queue", "appsink")
+)
+def test_volume_adjusts_delivered_pcm(tmp_path: Path) -> None:
+    path = tmp_path / "samples.wav"
+    _write_wav(path, np.arange(-400, 400, dtype="<i2"))
+    handler = RecordingHandler()
+    pipeline = FileCapturePipeline(
+        logger=_logger(),
+        handler=handler,
+        audio_format=AudioFormat(8_000, 1),
+        path=path,
+        replay_mode=FileReplayMode.AS_FAST_AS_POSSIBLE,
+        volume=0.0,
+    )
+
+    pipeline.start()
+    pipeline.wait(timeout=3)
+
+    assert np.all(np.concatenate([chunk.samples for chunk in handler.chunks]) == 0)
 
 
 @pytest.mark.gstreamer(

@@ -14,6 +14,7 @@ REQUIRED_GSTREAMER_FACTORIES = (
     "appsink",
     "audioconvert",
     "audioresample",
+    "volume",
     "queue",
     "clocksync",
     "tee",

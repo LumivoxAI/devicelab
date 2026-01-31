@@ -8,7 +8,7 @@ import pytest
 from lumivox_devicelab._gstreamer.audio import RawAudioSpec
 from lumivox_devicelab._gstreamer.runtime import get_gst
 from lumivox_devicelab._gstreamer.elements.app import AppSrc
-from lumivox_devicelab._gstreamer.elements.audio import AudioConvert, AudioResample
+from lumivox_devicelab._gstreamer.elements.audio import Volume, AudioConvert, AudioResample
 from lumivox_devicelab._gstreamer.elements.pipewire import PipeWireSink
 
 pytestmark = pytest.mark.gstreamer
@@ -26,6 +26,14 @@ def test_audio_resample_uses_kaiser_at_default_quality() -> None:
 
     assert element.impl.get_property("quality") == 4
     assert element.impl.get_property("resample-method").value_nick == "kaiser"
+
+
+def test_volume_uses_requested_linear_gain() -> None:
+    element = Volume(2.5)
+
+    assert element.impl.get_property("volume") == 2.5
+    element.set_volume(0.25)
+    assert element.impl.get_property("volume") == 0.25
 
 
 def test_audio_convert_accepts_valid_channel_mapping() -> None:

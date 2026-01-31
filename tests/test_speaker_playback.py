@@ -170,10 +170,22 @@ def test_graph_uses_only_required_bounded_queues(
             self.impl = object()
             created.append((kind, kwargs))
 
+        def set_volume(self, volume: float) -> None:
+            del volume
+
     def factory(kind: str) -> Callable[..., FakeElement]:
         return lambda *args, **kwargs: FakeElement(kind, kwargs)
 
-    for name in ("AppSrc", "AudioConvert", "AudioResample", "CapsFilter", "PipeWireSink", "Tee", "AudioQueue"):
+    for name in (
+        "AppSrc",
+        "AudioConvert",
+        "AudioResample",
+        "CapsFilter",
+        "Volume",
+        "PipeWireSink",
+        "Tee",
+        "AudioQueue",
+    ):
         monkeypatch.setattr(f"lumivox_devicelab.speaker.{name}", factory(name))
     recording_branch = Mock()
     recording_branch.build.return_value = Mock()

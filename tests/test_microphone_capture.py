@@ -220,6 +220,9 @@ def test_explicit_mapping_builds_required_bounded_chain(monkeypatch: pytest.Monk
         def observe_caps(self, callback: object) -> None:
             del callback
 
+        def set_volume(self, volume: float) -> None:
+            del volume
+
     def factory(kind: str):  # type: ignore[no-untyped-def]
         return lambda *args, **kwargs: FakeElement(kind, args, kwargs)
 
@@ -229,6 +232,7 @@ def test_explicit_mapping_builds_required_bounded_chain(monkeypatch: pytest.Monk
         "AudioConvert",
         "AudioResample",
         "CapsFilter",
+        "Volume",
         "AudioQueue",
         "AppSink",
     ):
@@ -250,6 +254,7 @@ def test_explicit_mapping_builds_required_bounded_chain(monkeypatch: pytest.Monk
         "AudioConvert",
         "AudioResample",
         "CapsFilter",
+        "Volume",
         "AudioQueue",
         "AppSink",
         "SourceChannelCapsFilter",
@@ -270,6 +275,7 @@ def test_explicit_mapping_builds_required_bounded_chain(monkeypatch: pytest.Monk
         "AudioConvert",
         "AudioResample",
         "CapsFilter",
+        "Volume",
         "AudioQueue",
         "AppSink",
     ]
@@ -286,10 +292,22 @@ def test_recording_graph_gives_each_tee_branch_a_bounded_queue(monkeypatch: pyte
         def observe_caps(self, callback: object) -> None:
             del callback
 
+        def set_volume(self, volume: float) -> None:
+            del volume
+
     def factory(kind: str):  # type: ignore[no-untyped-def]
         return lambda *args, **kwargs: FakeElement(kind, kwargs)
 
-    for name in ("PipeWireSrc", "AudioConvert", "AudioResample", "CapsFilter", "AudioQueue", "AppSink", "Tee"):
+    for name in (
+        "PipeWireSrc",
+        "AudioConvert",
+        "AudioResample",
+        "CapsFilter",
+        "Volume",
+        "AudioQueue",
+        "AppSink",
+        "Tee",
+    ):
         monkeypatch.setattr(f"lumivox_devicelab.microphone.{name}", factory(name))
     recording = Mock()
     build_recording = Mock(return_value=recording)
