@@ -6,6 +6,17 @@ Devicelab exposes scenario objects rather than GStreamer elements. It owns each
 media graph, its workers, bounded queues, timestamps, device resolution, and
 teardown. GStreamer and PipeWire objects remain implementation details.
 
+## Volume
+
+Every pipeline accepts `volume: float = 1.0`, exposes `volume`, and provides
+`set_volume(value)`. It uses linear gain: `0.0` is silence, `1.0` is unchanged,
+and `10.0` is the maximum supported gain. Set it before `start()` or while the
+pipeline is running; setting it during startup, stopping, or after stop raises
+`PipelineStateError`. The gain element is after PCM normalization and before
+all downstream branches, so handlers, speakers, and WAV/FLAC recordings receive
+the adjusted signal. Gains above `1.0` can clip S16LE samples. Microphone
+recovery keeps and reapplies the latest value.
+
 ## Shared Lifecycle
 
 Every pipeline has a single-use lifecycle:
@@ -41,6 +52,7 @@ PipeWire source
   -> audio conversion
   -> resampling
   -> exact S16LE/rate/channel caps
+  -> linear volume
   -> bounded 200 ms DROP_OLD queue
   -> one-buffer dropping app sink
   -> Python delivery worker
@@ -100,7 +112,7 @@ WAV input uses `wavparse`; FLAC uses `flacparse` and `flacdec`. Both then pass
 through the same normalization used by live capture:
 
 ```text
-file source -> parser/decoder -> conversion -> resampling -> exact S16LE caps
+file source -> parser/decoder -> conversion -> resampling -> exact S16LE caps -> linear volume
 ```
 
 `FileReplayMode.REALTIME` adds clock synchronization and bounded `DROP_OLD`
@@ -127,6 +139,7 @@ Python S16LE array
   -> audio conversion
   -> resampling
   -> exact S16LE/rate/channel caps
+  -> linear volume
   -> PipeWire sink
 ```
 
@@ -173,8 +186,8 @@ segment. Graceful speaker completion guarantees that all successfully accepted
 PCM appears in its recording. Immediate speaker stop or asynchronous speaker
 failure removes the unpublished temporary file.
 
-Speaker recordings contain submitted PCM only. Idle timestamp gaps do not add
-silence.
+Speaker recordings contain submitted PCM after volume adjustment only. Idle
+timestamp gaps do not add silence.
 
 ## Composing File Capture With Playback
 

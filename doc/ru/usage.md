@@ -85,6 +85,20 @@ except KeyboardInterrupt:
 ошибок источника, сохраняя публичное состояние `running`; подробности описаны в
 разделе [Пайплайны](pipelines.md).
 
+## Регулировка громкости
+
+Каждый pipeline захвата и воспроизведения принимает линейную `volume` от `0.0`
+до `10.0`. `0.0` означает тишину, `1.0` сохраняет уровень источника. Значение
+можно задать в конструкторе или изменить во время работы:
+
+```python
+pipeline.set_volume(0.6)
+current_volume = pipeline.volume
+```
+
+Измененный PCM получает capture handler, воспроизводит speaker и записывает
+опциональная запись. Gain выше `1.0` может вызвать clipping S16LE.
+
 ## Выбор входных каналов
 
 `ChannelSelection` доступен только для микрофона. Индекс mapping соответствует
@@ -121,6 +135,7 @@ pipeline = FileCapturePipeline(
     audio_format=AudioFormat(sample_rate=16_000, channels=1),
     path="input.flac",
     replay_mode=FileReplayMode.AS_FAST_AS_POSSIBLE,
+    volume=0.8,
 )
 pipeline.start()
 pipeline.wait()
@@ -144,6 +159,7 @@ pipeline = SpeakerPlaybackPipeline(
     logger=logger,
     audio_format=audio_format,
     device_id="alsa_output.example",
+    volume=0.8,
 )
 
 pipeline.start()

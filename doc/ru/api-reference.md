@@ -190,6 +190,21 @@ wait(*, timeout: float | None = None) -> None
 Timeout должен быть конечным положительным real number, кроме `bool`. Только
 `wait(timeout=None)` допускает неограниченное ожидание.
 
+У pipeline также есть линейная регулировка gain:
+
+```python
+@property
+volume -> float
+
+set_volume(volume: float) -> None
+```
+
+Допустимы конечные real numbers от `0.0` до `10.0`, кроме `bool`. `0.0`
+означает тишину, `1.0` сохраняет нормализованный уровень. Setter допустим в
+`created` и `running`; в остальных lifecycle-состояниях возникает
+`PipelineStateError`. Gain применяется к PCM, который pipeline выдает,
+воспроизводит и записывает. Значения больше `1.0` могут вызвать clipping S16LE.
+
 ## Классы пайплайнов
 
 ### `MicrophoneCapturePipeline`
@@ -204,6 +219,7 @@ MicrophoneCapturePipeline(
     channel_selection: ChannelSelection | None = None,
     record_to: str | os.PathLike[str] | None = None,
     overwrite: bool = False,
+    volume: float = 1.0,
 )
 ```
 
@@ -227,6 +243,7 @@ FileCapturePipeline(
     audio_format: AudioFormat,
     path: str | os.PathLike[str],
     replay_mode: FileReplayMode,
+    volume: float = 1.0,
 )
 ```
 
@@ -243,6 +260,7 @@ SpeakerPlaybackPipeline(
     device_id: str,
     record_to: str | os.PathLike[str] | None = None,
     overwrite: bool = False,
+    volume: float = 1.0,
 )
 
 submit(data: numpy.ndarray) -> None

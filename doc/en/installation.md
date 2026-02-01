@@ -75,7 +75,7 @@ just test_gstreamer
 ```
 
 The runtime paths require factories provided by the installed plugin packages,
-including `appsrc`, `appsink`, `audioconvert`, `audioresample`, `queue`,
+including `appsrc`, `appsink`, `audioconvert`, `audioresample`, `volume`, `queue`,
 `clocksync`, `tee`, `filesink`, `pipewiresrc`, `pipewiresink`, `wavparse`,
 `wavenc`, `flacparse`, `flacdec`, and `flacenc`.
 

@@ -81,6 +81,20 @@ Construction validates arguments but does not access the device. Runtime setup
 begins in `start()`. Microphone capture retries a documented subset of source
 failures while keeping the public state `running`; see [Pipelines](pipelines.md).
 
+## Adjust Volume
+
+Every capture and playback pipeline accepts a linear `volume` from `0.0` to
+`10.0`. `0.0` is silence and `1.0` preserves the source level. It can be set at
+construction or changed while running:
+
+```python
+pipeline.set_volume(0.6)
+current_volume = pipeline.volume
+```
+
+The adjusted PCM is delivered to capture handlers, played by speakers, and
+written to optional recordings. Gain above `1.0` may clip S16LE samples.
+
 ## Select Input Channels
 
 `ChannelSelection` is available only for microphone capture. The mapping index
@@ -117,6 +131,7 @@ pipeline = FileCapturePipeline(
     audio_format=AudioFormat(sample_rate=16_000, channels=1),
     path="input.flac",
     replay_mode=FileReplayMode.AS_FAST_AS_POSSIBLE,
+    volume=0.8,
 )
 pipeline.start()
 pipeline.wait()
@@ -139,6 +154,7 @@ pipeline = SpeakerPlaybackPipeline(
     logger=logger,
     audio_format=audio_format,
     device_id="alsa_output.example",
+    volume=0.8,
 )
 
 pipeline.start()

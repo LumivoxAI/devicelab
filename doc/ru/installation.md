@@ -75,7 +75,7 @@ just test_gstreamer
 ```
 
 Рабочим пайплайнам нужны фабрики из установленных пакетов плагинов, включая
-`appsrc`, `appsink`, `audioconvert`, `audioresample`, `queue`, `clocksync`,
+`appsrc`, `appsink`, `audioconvert`, `audioresample`, `volume`, `queue`, `clocksync`,
 `tee`, `filesink`, `pipewiresrc`, `pipewiresink`, `wavparse`, `wavenc`,
 `flacparse`, `flacdec` и `flacenc`.
 

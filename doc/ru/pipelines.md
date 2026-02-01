@@ -7,6 +7,18 @@ Devicelab предоставляет сценарные объекты, а не 
 разрешением устройств и остановкой. Объекты GStreamer и PipeWire остаются
 деталями реализации.
 
+## Громкость
+
+Каждый pipeline принимает `volume: float = 1.0`, имеет свойство `volume` и
+метод `set_volume(value)`. Используется линейный gain: `0.0` означает тишину,
+`1.0` не меняет сигнал, `10.0` является максимальным поддерживаемым gain.
+Значение можно задать до `start()` или изменить в работающем pipeline; во время
+startup, stopping или после stop возникает `PipelineStateError`. Элемент gain
+стоит после PCM-нормализации и до всех downstream-веток, поэтому handler,
+динамик и WAV/FLAC-запись получают измененный сигнал. Gain выше `1.0` может
+вызвать clipping S16LE. Recovery микрофона сохраняет и повторно применяет
+последнее значение.
+
 ## Общий жизненный цикл
 
 Каждый пайплайн одноразовый:
@@ -44,6 +56,7 @@ PipeWire source
   -> audio conversion
   -> resampling
   -> точные caps S16LE/rate/channels
+  -> линейная громкость
   -> ограниченная 200 ms очередь DROP_OLD
   -> app sink с отбрасыванием и емкостью один буфер
   -> Python delivery worker
@@ -101,7 +114,7 @@ WAV использует `wavparse`, FLAC - `flacparse` и `flacdec`. Далее
 общую нормализацию:
 
 ```text
-file source -> parser/decoder -> conversion -> resampling -> точные S16LE caps
+file source -> parser/decoder -> conversion -> resampling -> точные S16LE caps -> линейная громкость
 ```
 
 `FileReplayMode.REALTIME` добавляет синхронизацию по часам и ограниченную
@@ -128,6 +141,7 @@ Python S16LE array
   -> audio conversion
   -> resampling
   -> точные caps S16LE/rate/channels
+  -> линейная громкость
   -> PipeWire sink
 ```
 
@@ -175,8 +189,8 @@ normalized audio -> tee
 всего успешно принятого PCM. Немедленная остановка или асинхронная ошибка
 speaker удаляет неопубликованный временный файл.
 
-Запись speaker содержит только отправленный PCM. Временные промежутки простоя
-не заполняются тишиной.
+Запись speaker содержит только отправленный PCM после регулировки громкости.
+Временные промежутки простоя не заполняются тишиной.
 
 ## Объединение файла и воспроизведения
 

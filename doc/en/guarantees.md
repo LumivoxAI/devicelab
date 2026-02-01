@@ -161,7 +161,7 @@ not an availability guarantee.
 - Output is atomically published after successful encoder finalization.
 - Collision protection is rechecked at publication.
 - A blocking recording branch may increase live latency.
-- Graceful speaker stop records every successfully accepted frame.
+- Graceful speaker stop records every successfully accepted frame after volume adjustment.
 - Immediate stop may discard audio and does not publish an incomplete speaker
   recording.
 - Recording is not a transaction across microphone generations: each
@@ -181,5 +181,5 @@ Devicelab does not guarantee:
   backpressure described here;
 - support for formats other than public PCM S16LE, or media files other than
   WAV/FLAC input and recording;
-- application-level DSP such as gain control, VAD, echo cancellation, speech
-  recognition, or synthesis.
+- application-level DSP such as VAD, echo cancellation, speech recognition, or
+  synthesis.
