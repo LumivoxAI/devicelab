@@ -18,7 +18,7 @@ device recovery, and failures are part of the public contract.
 ## Supported Environment
 
 - Linux, with Ubuntu 24.04 as the supported baseline
-- Python 3.11 through 3.14
+- Python 3.13 through 3.14
 - GStreamer 1.24 or newer
 - PipeWire 1.0 or newer
 - WirePlumber 0.4.17 or newer

@@ -142,7 +142,7 @@ Pytest markers are:
 
 ## Style And Tooling
 
-- Supported syntax baseline: Python 3.11.
+- Supported syntax baseline: Python 3.13.
 - Ruff line length: 120, double quotes, lint families `E`, `F`, and `I`.
 - Mypy runs in strict mode over `src/lumivox_devicelab`, `tests`, and
   `examples`.

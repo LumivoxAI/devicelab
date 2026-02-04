@@ -144,7 +144,7 @@ Pytest markers:
 
 ## Стиль и инструменты
 
-- Минимальная версия синтаксиса: Python 3.11.
+- Минимальная версия синтаксиса: Python 3.13.
 - Ruff: длина строки 120, двойные кавычки, lint families `E`, `F` и `I`.
 - Mypy работает в strict mode для `src/lumivox_devicelab`, `tests` и `examples`.
 - Пакет типизирован и включает `py.typed`.

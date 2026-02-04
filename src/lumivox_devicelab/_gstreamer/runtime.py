@@ -25,10 +25,10 @@ def get_gst() -> Any:
         with _gst_lock:
             if _gst is None:
                 try:
-                    import gi  # type: ignore[import-not-found]
+                    import gi  # type: ignore[import-untyped]
 
                     gi.require_version("Gst", "1.0")
-                    from gi.repository import Gst  # type: ignore[import-not-found]
+                    from gi.repository import Gst  # type: ignore[import-untyped]
                 except (ImportError, ValueError) as error:
                     raise GStreamerUnavailableError(
                         "PyGObject with GStreamer 1.0 introspection bindings is required. "

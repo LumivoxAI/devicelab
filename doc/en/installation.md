@@ -4,7 +4,7 @@
 
 ## Requirements
 
-The supported baseline is Ubuntu 24.04 with Python 3.11-3.14, GStreamer 1.24+,
+The supported baseline is Ubuntu 24.04 with Python 3.13-3.14, GStreamer 1.24+,
 PipeWire 1.0+, and WirePlumber 0.4.17+. Rolling Arch Linux is tested on a
 best-effort basis. Other operating systems and PipeWire session managers are
 not supported by the current release.
