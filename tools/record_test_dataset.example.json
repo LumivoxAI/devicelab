@@ -1,0 +1,15 @@
+{
+  "start_delay_seconds": 10,
+  "phrase_delay_seconds": 5,
+  "record_seconds": 4,
+  "phrases": [
+    {
+      "id": "alice_how_are_you_near",
+      "text": "Алиса, как дела?"
+    },
+    {
+      "id": "alice_weather_far",
+      "text": "Алиса, какая сегодня погода?"
+    }
+  ]
+}
