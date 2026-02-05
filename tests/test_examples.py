@@ -8,14 +8,21 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    "name",
-    ["microphone_capture.py", "file_capture.py", "speaker_playback.py", "recording.py", "record_playback_gui.py"],
+    "relative_path",
+    [
+        "examples/microphone_capture.py",
+        "examples/file_capture.py",
+        "examples/speaker_playback.py",
+        "examples/recording.py",
+        "examples/record_playback_gui.py",
+        "tools/record_test_dataset.py",
+    ],
 )
-def test_example_help_does_not_access_gstreamer_or_hardware(name: str) -> None:
-    example = Path(__file__).parents[1] / "examples" / name
+def test_script_help_does_not_access_gstreamer_or_hardware(relative_path: str) -> None:
+    script = Path(__file__).parents[1] / relative_path
 
     result = subprocess.run(
-        [sys.executable, str(example), "--help"],
+        [sys.executable, str(script), "--help"],
         check=False,
         capture_output=True,
         text=True,
